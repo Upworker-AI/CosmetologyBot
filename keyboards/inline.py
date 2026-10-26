@@ -9,9 +9,8 @@ def main_menu():
             [InlineKeyboardButton(
                 text="📅 Записаться",
                 callback_data="book:start"
-            )
-            ],
-            [InlineKeyboardButton(
+            ),
+            InlineKeyboardButton(
                 text="💎 Услуги и цены",
                 callback_data="services:root"
             )
@@ -19,9 +18,8 @@ def main_menu():
             [InlineKeyboardButton(
                 text="🔥 Акции",
                 callback_data="promo"
-            )
-            ],
-            [InlineKeyboardButton(
+            ),
+            InlineKeyboardButton(
                 text="📍 Адрес и часы работы",
                 callback_data="contacts"
             )
@@ -29,6 +27,10 @@ def main_menu():
             [InlineKeyboardButton(
                 text="❓ Частые вопросы",
                 callback_data="faq"
+            ),
+            InlineKeyboardButton(
+                text="💬 Связаться",
+                callback_data="contact_me"
             )
             ]
         ]

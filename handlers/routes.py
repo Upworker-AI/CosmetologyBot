@@ -9,7 +9,8 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     FSInputFile
 )
-from forms.user import BookingStates
+
+from config import OWNER_TELEGRAM
 from keyboards.inline import main_menu, back_to_main_menu
 from database.db import get_categories, get_services_by_category,get_service
 
@@ -29,24 +30,37 @@ async def start(message: Message):
     )
 
 @router.callback_query(F.data == "book:start")
-async def booking(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "📅 <b>Запись</b>\n\n"
-        "Скоро появиться возможность записаться",
-        reply_markup=back_to_main_menu()
+async def start_booking_from_menu(callback: CallbackQuery):
+    await callback.answer()
+
+    categories = await get_categories()
+
+    if not categories:
+        await callback.message.edit_text(
+            "Пока услуги не добавлены.",
+            reply_markup=back_to_main_menu()
+        )
+        return
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=category["category"],
+                callback_data=f"category:{category['category']}"
+            )
+        ]
+        for category in categories
+    ]
+
+    buttons.append(
+        [InlineKeyboardButton(text="⬅️ В главное меню", callback_data="main_menu")]
     )
-    await callback.answer()
 
-@router.callback_query(F.data.startswith("book:start:"))
-async def start_booking(callback: CallbackQuery):
-    await callback.answer()
-
-    service_id = int(callback.data.split(":")[2])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     await callback.message.edit_text(
-        "Отлично! Запись будет доступна в следующей версии.\n"
-        f"ID выбранной услуги: <code>{service_id}</code>",
-        reply_markup=back_to_main_menu()
+        "Выберите категорию услуги:",
+        reply_markup=keyboard
     )
 
 @router.callback_query(F.data == "services:root")
@@ -76,7 +90,7 @@ async def show_services(callback: CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(
-        "💎 <b>Услуги и цены</b>\n\n",
+        "<b>Выберите категорию услуг:</b>\n\n",
         reply_markup=keyboard
     )
     await callback.answer()
@@ -153,8 +167,8 @@ async def show_service(callback: CallbackQuery):
                     text="📅 Записаться",
                     callback_data=f"book:start:{service_id}"
                 )
-            ],
-            [
+            ,
+
                 InlineKeyboardButton(
                     text="⬅️ К услугам",
                     callback_data=f"category:{service['category']}"
@@ -202,6 +216,15 @@ async def show_faq(callback: CallbackQuery):
     await callback.message.answer(
         "❓ <b>Частые вопросы</b>\n\n"
         "Скоро здесь появятся ответы на популярные вопросы.",
+    reply_markup=back_to_main_menu()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "contact_me")
+async def show_contact(callback: CallbackQuery):
+    await callback.message.answer(
+        f"💬 <b>Связь</b>\n\n"
+        f"Если у вас остались вопросы, вы\nвсегда можете написать <a href='{OWNER_TELEGRAM}'>мне</a>.",
     reply_markup=back_to_main_menu()
     )
     await callback.answer()

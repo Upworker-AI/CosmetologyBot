@@ -17,10 +17,11 @@ async def get_categories():
 
         cursor = await db.execute(
             """
-            SELECT DISTINCT category
+            SELECT category,  MIN(category_order) AS category_order
             FROM services
             WhERE is_active = 1
-            ORDER BY category
+            GROUP BY category
+            ORDER BY category_order, category
             """
         )
         rows = await cursor.fetchall()
