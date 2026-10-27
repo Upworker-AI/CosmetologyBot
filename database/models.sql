@@ -15,12 +15,14 @@ CREATE TABLE IF NOT EXISTS services (
     price TEXT NOT NULL,
     duration_minutes INTEGER,
     is_active INTEGER DEFAULT 1,
-    sort_order INTEGER DEFAULT 0
+    sort_order INTEGER DEFAULT 0,
+    category_order INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS booking_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id INTEGER NOT NULL REFERENCES clients(id),
+    client_telegram_id INTEGER,
     service_id INTEGER NOT NULL REFERENCES services(id),
     preferred_date TEXT NOT NULL,
     preferred_time_slot TEXT NOT NULL,

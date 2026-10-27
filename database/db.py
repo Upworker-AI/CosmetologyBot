@@ -57,3 +57,95 @@ async def get_service(service_id: int):
         )
         row = await cursor.fetchone()
         return row
+
+async def get_or_create_client(
+    telegram_id: int,
+    username: str | None,
+    full_name: str | None,
+    phone: str | None,
+):
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        db.row_factory = aiosqlite.Row
+
+        cursor = await db.execute(
+            """
+            SELECT id
+            FROM clients
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,)
+        )
+        client = await cursor.fetchone()
+
+        if client:
+            return client["id"]
+
+        cursor = await db.execute(
+            """
+            INSERT INTO clients
+            (telegram_id, username, full_name, phone)
+            VALUES (?, ?, ?, ?)
+            """,
+            (telegram_id, username, full_name, phone)
+        )
+        await db.commit()
+
+        return cursor.lastrowid
+
+
+async def create_booking_request(
+    client_id: int,
+    client_telegram_id: int,
+    service_id: int,
+    preferred_date: str,
+    preferred_time_slot: str,
+    note: str | None,
+):
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO booking_requests
+            (client_id, client_telegram_id, service_id, preferred_date, preferred_time_slot, note)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                client_id,
+                client_telegram_id,
+                service_id,
+                preferred_date,
+                preferred_time_slot,
+                note,
+            )
+        )
+        await db.commit()
+
+        return cursor.lastrowid
+
+
+async def update_booking_status(booking_id: int, status: str):
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        await db.execute(
+            """
+            UPDATE booking_requests
+            SET status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (status, booking_id)
+        )
+        await db.commit()
+
+async def get_client_telegram_id(booking_id: int):
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        db.row_factory = aiosqlite.Row
+
+        cursor = await db.execute(
+            """
+            SELECT client_telegram_id
+            FROM booking_requests
+            WHERE id = ?
+            """,
+            (booking_id,)
+        )
+        row = await cursor.fetchone()
+        return row["client_telegram_id"] if row else None

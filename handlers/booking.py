@@ -8,9 +8,15 @@ from aiogram.types import (
     InlineKeyboardMarkup
 )
 from datetime import datetime
-from database.db import get_service
 from keyboards.inline import back_to_main_menu, date_keyboard
-
+from config import OWNER_TELEGRAM_ID
+from database.db import (
+    get_service,
+    get_or_create_client,
+    get_client_telegram_id,
+    create_booking_request,
+    update_booking_status,
+)
 router = Router()
 
 
@@ -260,6 +266,23 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
     data = await state.get_data()
+
+    client_id = await get_or_create_client(
+        telegram_id=callback.from_user.id,
+        username=callback.from_user.username,
+        full_name=data.get("name"),
+        phone=data.get("phone"),
+    )
+
+    booking_id = await create_booking_request(
+        client_id=client_id,
+        client_telegram_id=callback.from_user.id,
+        service_id=data.get("service_id"),
+        preferred_date=data.get("preferred_date"),
+        preferred_time_slot=data.get("preferred_time_slot"),
+        note=data.get("note"),
+    )
+
     await state.clear()
 
     await callback.message.edit_text(
@@ -269,3 +292,95 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         f"Время: {data.get('preferred_time_slot')}\n\n"
         "Мастер свяжется с вами для подтверждения."
     )
+    await notify_owner(
+        bot=callback.bot,
+        booking_id=booking_id,
+        data=data,
+        callback=callback,
+    )
+
+async def notify_owner(bot, booking_id: int, data: dict, callback: CallbackQuery):
+    if not OWNER_TELEGRAM_ID:
+        return
+
+    username = callback.from_user.username or "нет"
+    note = data.get("note") or "нет"
+
+    text = (
+        f"🆕 <b>Новая заявка #{booking_id}</b>\n\n"
+        f"Услуга: <b>{data.get('service_title')}</b>\n"
+        f"Цена: {data.get('service_price')}\n"
+        f"Дата: {data.get('preferred_date')}\n"
+        f"Время: {data.get('preferred_time_slot')}\n"
+        f"Имя: {data.get('name')}\n"
+        f"Телефон: {data.get('phone')}\n"
+        f"Telegram: @{username}\n"
+        f"Комментарий: {note}"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить",
+                    callback_data=f"admin:confirm:{booking_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отменить",
+                    callback_data=f"admin:cancel:{booking_id}"
+                )
+            ],
+        ]
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=OWNER_TELEGRAM_ID,
+            text=text,
+            reply_markup=keyboard
+        )
+    except Exception as error:
+        print(f"Не удалось отправить уведомление владельцу: {error}")
+
+@router.callback_query(F.data.startswith("admin:confirm:"))
+async def admin_confirm(callback: CallbackQuery):
+    await callback.answer()
+
+    booking_id = int(callback.data.split(":")[2])
+
+    await update_booking_status(booking_id, "confirmed")
+
+    await callback.message.edit_text(
+        callback.message.html_text + "\n\n✅ <b>Заявка подтверждена.</b>",
+        reply_markup=None
+    )
+    client_telegram_id = await get_client_telegram_id(booking_id)
+
+    if client_telegram_id:
+        await callback.bot.send_message(
+            chat_id=client_telegram_id,
+            text="✅ Ваша заявка подтверждена. Ждём вас!"
+        )
+
+@router.callback_query(F.data.startswith("admin:cancel:"))
+async def admin_cancel(callback: CallbackQuery):
+    await callback.answer()
+
+    booking_id = int(callback.data.split(":")[2])
+
+    await update_booking_status(booking_id, "cancelled")
+
+    await callback.message.edit_text(
+        callback.message.html_text + "\n\n❌ <b>Заявка отменена.</b>",
+        reply_markup=None
+    )
+
+    client_telegram_id = await get_client_telegram_id(booking_id)
+
+    if client_telegram_id:
+        await callback.bot.send_message(
+            chat_id=client_telegram_id,
+            text="❌ К сожалению, ваша заявка была отменена. Свяжитесь с мастером, чтобы выбрать другое время."
+        )

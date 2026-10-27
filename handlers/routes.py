@@ -3,14 +3,10 @@ from aiogram.filters import Command
 from aiogram.types import (
     Message,
     CallbackQuery,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    FSInputFile
 )
 
-from config import OWNER_TELEGRAM
 from keyboards.inline import main_menu, back_to_main_menu
 from database.db import get_categories, get_services_by_category,get_service
 
@@ -224,7 +220,7 @@ async def show_faq(callback: CallbackQuery):
 async def show_contact(callback: CallbackQuery):
     await callback.message.answer(
         f"💬 <b>Связь</b>\n\n"
-        f"Если у вас остались вопросы, вы\nвсегда можете написать <a href='{OWNER_TELEGRAM}'>мне</a>.",
+        f"Если у вас остались вопросы, вы\nвсегда можете написать.",
     reply_markup=back_to_main_menu()
     )
     await callback.answer()
