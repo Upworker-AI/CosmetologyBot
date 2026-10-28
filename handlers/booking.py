@@ -241,11 +241,12 @@ async def receive_contact_phone(message: Message, state: FSMContext):
         ]
     )
 
-    await message.answer(
+    sent_message = await message.answer(
         "Спасибо! Номер получен.\n\n"
         "Если у вас есть пожелания, аллергии или вопросы, напишите их здесь.",
         reply_markup=keyboard
     )
+    await state.update_data(note_message_id=sent_message.message_id)
 
 @router.message(BookingStates.entering_phone, F.text == "⌨️ Ввести номер вручную")
 async def ask_manual_phone(message: Message, state: FSMContext):
@@ -272,10 +273,7 @@ async def enter_phone(message: Message, state: FSMContext):
 
     await state.update_data(phone=phone)
     await state.set_state(BookingStates.entering_note)
-    await message.answer(
-        "Спасибо! Номер получен.",
-        reply_markup=ReplyKeyboardRemove()
-    )
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -286,15 +284,28 @@ async def enter_phone(message: Message, state: FSMContext):
             ]
         ]
     )
-
-    await message.answer(
+    sent_message = await message.answer(
+        "Спасибо! Номер получен.\n\n"
         "Если у вас есть пожелания, аллергии или вопросы, напишите их здесь.",
-        reply_markup=keyboard
+        reply_markup=ReplyKeyboardRemove()
     )
+    await state.update_data(note_message_id=sent_message.message_id)
+    await sent_message.edit_reply_markup(reply_markup=keyboard)
 
 @router.message(BookingStates.entering_note)
 async def enter_note(message: Message, state: FSMContext):
     await state.update_data(note=message.text.strip())
+
+    data = await state.get_data()
+    note_message_id = data.get("note_message_id")
+
+    if note_message_id:
+        await message.bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=note_message_id,
+            text="Комментарий сохранён. Формируем заявку..."
+        )
+
     await show_confirmation(message, state)
 
 @router.callback_query(BookingStates.entering_note, F.data == "note:skip")
@@ -519,8 +530,6 @@ async def admin_panel(callback: CallbackQuery):
 async def use_saved_contact(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
-    # Контакты уже сохранены, дата и время выбраны,
-    # если услуга требует их выбора.
     await state.set_state(BookingStates.entering_note)
 
     keyboard = InlineKeyboardMarkup(
@@ -534,10 +543,11 @@ async def use_saved_contact(callback: CallbackQuery, state: FSMContext):
         ]
     )
 
-    await callback.message.answer(
+    await callback.message.edit_text(
         "Контакты подтверждены!\n\n"
         "Если у вас есть пожелания, аллергии или вопросы, "
-        "напишите их здесь.",
+        "напишите их здесь.\n\n"
+        "Или нажмите «Пропустить».",
         reply_markup=keyboard
     )
 
