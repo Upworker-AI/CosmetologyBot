@@ -5,15 +5,27 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    ReplyKeyboardRemove
 )
+from aiogram.fsm.context import FSMContext
 
 from keyboards.inline import main_menu, back_to_main_menu
-from database.db import get_categories, get_services_by_category,get_service
+from database.db import get_categories, get_services_by_category,get_service, get_client_bookings
+from config import OWNER_TELEGRAM_ID
+
+STATUS_LABELS = {
+    "new": "⏳ Ожидает подтверждения",
+    "confirmed": "✅ Подтверждена",
+    "cancelled": "❌ Отменена",
+    "completed": "🏁 Завершена",
+}
 
 router = Router()
 
 @router.message(Command("start"))
-async def start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    is_owner = message.from_user.id ==OWNER_TELEGRAM_ID
     await message.answer(
         f"Привет, <b>{message.from_user.first_name}</b>! 👋\n\n"
         "Я бот студии «Beauty Studio».\n\n"
@@ -21,8 +33,8 @@ async def start(message: Message):
         "• посмотреть услуги и цены\n"
         "• оставить заявку на запись\n"
         "• найти адрес и часы работы\n\n"
-        "Выберите раздел 👇",
-        reply_markup=main_menu()
+        "Выберите что вас интересует 👇",
+        reply_markup=main_menu(is_owner=is_owner)
     )
 
 @router.callback_query(F.data == "book:start")
@@ -61,13 +73,16 @@ async def start_booking_from_menu(callback: CallbackQuery):
 
 @router.callback_query(F.data == "services:root")
 async def show_services(callback: CallbackQuery):
+
     categories = await get_categories()
+
     if not categories:
         await callback.message.edit_text(
             "Пока услуги не добавлены.",
             reply_markup=back_to_main_menu()
         )
         return
+
     buttons = [
         [InlineKeyboardButton(
             text=category["category"],
@@ -85,9 +100,11 @@ async def show_services(callback: CallbackQuery):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
     await callback.message.edit_text(
-        "<b>Выберите категорию услуг:</b>\n\n",
-        reply_markup=keyboard
+        "💎 <b>Услуги и цены</b>\n\n"
+        "Выберите категорию:",
+         reply_markup=keyboard
     )
     await callback.answer()
 
@@ -147,13 +164,11 @@ async def show_service(callback: CallbackQuery):
         )
         return
 
-    duration = service["duration_minutes"] or "уточняется"
-
     text = (
-        f"<b>{service['title']}</b>\n\n"
-        f"{service['description'] or ''}\n\n"
+        f"💎 <b>{service['title']}</b>\n\n"
+        f"{service['description'] or 'Описание уточняется.'}\n\n"
         f"💰 Цена: <b>{service['price']}</b>\n"
-        f"⏱ Длительность: {duration} мин."
+        f"⏱ Длительность: {service["duration_minutes"] or "уточняется"} мин."
     )
 
     keyboard = InlineKeyboardMarkup(
@@ -183,7 +198,7 @@ async def show_service(callback: CallbackQuery):
 
 @router.callback_query(F.data == "promo")
 async def show_promo(callback: CallbackQuery):
-    await callback.message.answer(
+    await callback.message.edit_text(
         "🔥 <b>Актуальные предложения</b>\n\n"
         "• Скидка 15% в день рождения\n"
         "• Скидка 5% для подписчиков канала\n"
@@ -196,7 +211,7 @@ async def show_promo(callback: CallbackQuery):
 
 @router.callback_query(F.data == "contacts")
 async def show_contacts(callback: CallbackQuery):
-    await callback.message.answer(
+    await callback.message.edit_text(
         "📍 <b>Адрес:</b>\n"
         "Нижний Новгород, Кукуево, 67\n\n"
         "⏰ Часы работы:\n"
@@ -209,7 +224,7 @@ async def show_contacts(callback: CallbackQuery):
 
 @router.callback_query(F.data == "faq")
 async def show_faq(callback: CallbackQuery):
-    await callback.message.answer(
+    await callback.message.edit_text(
         "❓ <b>Частые вопросы</b>\n\n"
         "Скоро здесь появятся ответы на популярные вопросы.",
     reply_markup=back_to_main_menu()
@@ -218,7 +233,7 @@ async def show_faq(callback: CallbackQuery):
 
 @router.callback_query(F.data == "contact_me")
 async def show_contact(callback: CallbackQuery):
-    await callback.message.answer(
+    await callback.message.edit_text(
         f"💬 <b>Связь</b>\n\n"
         f"Если у вас остались вопросы, вы\nвсегда можете написать.",
     reply_markup=back_to_main_menu()
@@ -227,8 +242,79 @@ async def show_contact(callback: CallbackQuery):
 
 @router.callback_query(F.data == "main_menu")
 async def back_to_manu(callback: CallbackQuery):
+    is_owner = callback.from_user.id == OWNER_TELEGRAM_ID
     await callback.message.edit_text(
-        "Главное меню:",
-        reply_markup=main_menu()
+        "Главное меню",
+        reply_markup=main_menu(is_owner=is_owner)
     )
     await callback.answer()
+
+@router.message(Command("my_bookings"))
+async def my_bookings(message: Message):
+    bookings = await get_client_bookings(message.from_user.id)
+
+    if not bookings:
+        await message.answer(
+            "У вас пока нет заявок.\n\n"
+            "Нажмите «Записаться» в главном меню.",
+            reply_markup=back_to_main_menu()
+        )
+        return
+
+    lines = ["📋 <b>Ваши последние заявки</b>\n"]
+
+    for booking in bookings:
+        status = STATUS_LABELS.get(booking["status"], booking["status"])
+
+        lines.append(
+            f"💎 {booking['service_title']}\n"
+            f"📅 {booking['preferred_date']}, {booking['preferred_time_slot']}\n"
+            f"Статус: {status}\n"
+        )
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=back_to_main_menu()
+    )
+
+@router.callback_query(F.data == "my_bookings")
+async def my_bookings_callback(callback: CallbackQuery):
+    await callback.answer()
+
+    bookings = await get_client_bookings(callback.from_user.id)
+
+    if not bookings:
+        await callback.message.edit_text(
+            "У вас пока нет заявок.",
+            reply_markup=back_to_main_menu()
+        )
+        return
+
+    lines = ["📋 <b>Ваши последние заявки</b>\n"]
+
+    for booking in bookings:
+        status = STATUS_LABELS.get(booking["status"], booking["status"])
+
+        lines.append(
+            f"#{booking['id']} — {booking['service_title']}\n"
+            f"📅 {booking['preferred_date']}, {booking['preferred_time_slot']}\n"
+            f"Статус: {status}\n"
+        )
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=back_to_main_menu()
+    )
+
+@router.message(Command("admin"))
+async def admin_menu(message: Message):
+    if message.from_user.id != OWNER_TELEGRAM_ID:
+        await message.answer("Эта команда доступна только владельцу.")
+        return
+
+    await message.answer(
+        "🛠 <b>Админ-панель</b>\n\n"
+        "Пока доступны команды:\n"
+        "• /my_bookings — последние заявки\n"
+        "• /start — клиентское меню"
+    )

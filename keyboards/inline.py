@@ -14,9 +14,8 @@ WEEKDAYS = {
     6: "Вс"
 }
 
-def main_menu():
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
+def main_menu(is_owner: bool = False):
+    buttons = [
             [InlineKeyboardButton(
                 text="📅 Записаться",
                 callback_data="book:start"
@@ -43,11 +42,23 @@ def main_menu():
                 text="💬 Связаться",
                 callback_data="contact_me"
             )
-            ]
-        ]
-    )
+            ],
+            [
+            InlineKeyboardButton(
+                text="📋 Мои записи",
+                callback_data="my_bookings"
+            )
+            ],
+    ]
 
-    return keyboard
+    if is_owner:
+        buttons.append(
+            [InlineKeyboardButton(
+                text="🛠 Админ-панель",
+                callback_data="admin:panel"
+            )]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def back_to_main_menu():
     keyboard = InlineKeyboardMarkup(

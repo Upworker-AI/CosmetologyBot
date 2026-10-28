@@ -69,6 +69,20 @@ async def get_or_create_client(
 
         cursor = await db.execute(
             """
+            INSERT INTO clients
+            (telegram_id, username, full_name, phone)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                username = excluded.username,
+                full_name = excluded.full_name,
+                phone = excluded.phone
+            """,
+            (telegram_id, username, full_name, phone)
+        )
+        await db.commit()
+
+        cursor = await db.execute(
+            """
             SELECT id
             FROM clients
             WHERE telegram_id = ?
@@ -77,21 +91,7 @@ async def get_or_create_client(
         )
         client = await cursor.fetchone()
 
-        if client:
-            return client["id"]
-
-        cursor = await db.execute(
-            """
-            INSERT INTO clients
-            (telegram_id, username, full_name, phone)
-            VALUES (?, ?, ?, ?)
-            """,
-            (telegram_id, username, full_name, phone)
-        )
-        await db.commit()
-
-        return cursor.lastrowid
-
+        return client["id"]
 
 async def create_booking_request(
     client_id: int,
@@ -149,3 +149,41 @@ async def get_client_telegram_id(booking_id: int):
         )
         row = await cursor.fetchone()
         return row["client_telegram_id"] if row else None
+
+async def get_client_bookings(telegram_id: int):
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        db.row_factory = aiosqlite.Row
+
+        cursor = await db.execute(
+            """
+            SELECT
+                br.id,
+                br.preferred_date,
+                br.preferred_time_slot,
+                br.status,
+                s.title AS service_title,
+                s.price AS service_price
+            FROM booking_requests br
+            JOIN services s ON s.id = br.service_id
+            WHERE br.client_telegram_id = ?
+            ORDER BY br.created_at DESC
+            LIMIT 10
+            """,
+            (telegram_id,)
+        )
+
+        return await cursor.fetchall()
+
+async def get_client_by_telegram_id(telegram_id: int):
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        db.row_factory = aiosqlite.Row
+
+        cursor = await db.execute(
+            """
+            SELECT id, full_name, phone
+            FROM clients
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,)
+        )
+        return await cursor.fetchone()
