@@ -1,7 +1,6 @@
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.filters import Command
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -249,7 +248,7 @@ async def receive_contact_phone(message: Message, state: FSMContext):
     await state.update_data(note_message_id=sent_message.message_id)
 
 @router.message(BookingStates.entering_phone, F.text == "⌨️ Ввести номер вручную")
-async def ask_manual_phone(message: Message, state: FSMContext):
+async def ask_manual_phone(message: Message):
     await message.answer(
         "Отправьте номер текстом.\n\nНапример: +7 800 555-35-35"
     )
@@ -294,21 +293,11 @@ async def enter_phone(message: Message, state: FSMContext):
 
 @router.message(BookingStates.entering_note)
 async def enter_note(message: Message, state: FSMContext):
-    await state.update_data(note=message.text.strip())
-
-    data = await state.get_data()
-    note_message_id = data.get("note_message_id")
-
-    if note_message_id:
-        await message.bot.edit_message_text(
-            chat_id=message.chat.id,
-            message_id=note_message_id,
-            text="Комментарий сохранён. Формируем заявку..."
-        )
-
+    note = (message.text or "").strip()
+    await state.update_data(note=note)
     await show_confirmation(message, state)
 
-@router.callback_query(BookingStates.entering_note, F.data == "note:skip")
+@router.callback_query(BookingStates.entering_note,F.data == "note:skip")
 async def skip_note(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.update_data(note="")
@@ -329,6 +318,7 @@ async def show_confirmation(message: Message, state: FSMContext):
         f"Телефон: {data.get('phone')}\n"
         f"Комментарий: {data.get('note') or 'нет'}"
     )
+
     if data.get('preferred_date') == 'Дата уточняется' :
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -336,7 +326,17 @@ async def show_confirmation(message: Message, state: FSMContext):
                 [InlineKeyboardButton(text="❌ Отменить", callback_data="book:cancel")],
             ]
         )
-        await message.answer(text, reply_markup=keyboard)
+        note_message_id = data.get("note_message_id")
+
+        if note_message_id:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=note_message_id,
+                text=text,
+                reply_markup=keyboard
+            )
+        else:
+            await message.answer(text, reply_markup=keyboard)
     else:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -345,8 +345,17 @@ async def show_confirmation(message: Message, state: FSMContext):
             [InlineKeyboardButton(text="❌ Отменить", callback_data="book:cancel")],
             ]
         )
-        await message.answer(text, reply_markup=keyboard)
+        note_message_id = data.get("note_message_id")
 
+        if note_message_id:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=note_message_id,
+                text=text,
+                reply_markup=keyboard
+            )
+        else:
+            await message.answer(text, reply_markup=keyboard)
 @router.callback_query(F.data == "book:cancel")
 async def cancel_booking(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Заявка отменена")
