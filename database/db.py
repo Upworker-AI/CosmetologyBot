@@ -1,5 +1,6 @@
 import aiosqlite
 from config import DATABASE_PATH
+from datetime import  datetime
 
 DATABASE_FILE = DATABASE_PATH
 
@@ -187,3 +188,114 @@ async def get_client_by_telegram_id(telegram_id: int):
             (telegram_id,)
         )
         return await cursor.fetchone()
+
+
+async def get_admin_bookings(
+    status: str | None = None,
+    service_id: int | None = None,
+):
+    """
+    Возвращает заявки для админ-панели.
+    status=None — заявки всех статусов.
+    service_id=None — услуги всех типов.
+    """
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        db.row_factory = aiosqlite.Row
+
+        query = """
+            SELECT
+                br.id,
+                br.preferred_date,
+                br.preferred_time_slot,
+                br.status,
+                br.note,
+                br.created_at,
+                br.client_telegram_id,
+                c.full_name,
+                c.phone,
+                c.username,
+                s.title AS service_title,
+                s.price AS service_price,
+                s.category AS service_category
+            FROM booking_requests br
+            LEFT JOIN clients c ON c.id = br.client_id
+            LEFT JOIN services s ON s.id = br.service_id
+            WHERE 1 = 1
+        """
+        params = []
+
+        if status is not None:
+            query += " AND br.status = ?"
+            params.append(status)
+
+        if service_id is not None:
+            query += " AND br.service_id = ?"
+            params.append(service_id)
+
+        query += " ORDER BY br.created_at DESC, br.id DESC"
+
+        cursor = await db.execute(query, params)
+        rows = await cursor.fetchall()
+
+        # Даты записаны в формате ДД.ММ.ГГГГ,
+        # поэтому сортируем их после преобразования.
+        def sort_key(row):
+            try:
+                date_value = datetime.strptime(
+                    row["preferred_date"], "%d.%m.%Y"
+                )
+            except (ValueError, TypeError):
+                date_value = datetime.max
+
+            return (date_value, row["preferred_time_slot"] or "")
+
+        return sorted(rows, key=sort_key)
+
+
+async def get_admin_booking_details(booking_id: int):
+    """Возвращает полную карточку одной заявки."""
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        db.row_factory = aiosqlite.Row
+
+        cursor = await db.execute(
+            """
+            SELECT
+                br.id,
+                br.preferred_date,
+                br.preferred_time_slot,
+                br.status,
+                br.note,
+                br.created_at,
+                br.updated_at,
+                br.client_telegram_id,
+                c.full_name,
+                c.phone,
+                c.username,
+                s.title AS service_title,
+                s.price AS service_price,
+                s.category AS service_category,
+                s.duration_minutes
+            FROM booking_requests br
+            LEFT JOIN clients c ON c.id = br.client_id
+            LEFT JOIN services s ON s.id = br.service_id
+            WHERE br.id = ?
+            """,
+            (booking_id,),
+        )
+
+        return await cursor.fetchone()
+
+
+async def get_admin_services():
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        db.row_factory = aiosqlite.Row
+
+        cursor = await db.execute(
+            """
+            SELECT id, title, category
+            FROM services
+            ORDER BY category, title
+            """
+        )
+
+        return await cursor.fetchall()
