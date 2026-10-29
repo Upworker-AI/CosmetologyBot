@@ -10,7 +10,7 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardRemove
 )
-from datetime import datetime
+from datetime import datetime, timedelta
 from keyboards.inline import back_to_main_menu, date_keyboard, admin_menu_keyboard, admin_booking_keyboard
 from config import OWNER_TELEGRAM_ID
 from database.db import (
@@ -23,6 +23,7 @@ from database.db import (
     get_admin_bookings,
     get_admin_booking_details,
     get_admin_services,
+    get_available_slots
 )
 router = Router()
 
@@ -117,7 +118,11 @@ async def choose_date(callback: CallbackQuery, state: FSMContext):
     await state.update_data(
         preferred_date=selected_date.strftime("%d.%m.%Y")
     )
-    await ask_time_slot(callback.message, state)
+    await ask_time_slot(
+    callback.message,
+    state,
+    edit_message=True
+)
 
 @router.message(BookingStates.entering_custom_date)
 async def enter_custom_date(message: Message, state: FSMContext):
@@ -148,34 +153,130 @@ async def enter_custom_date(message: Message, state: FSMContext):
     await state.update_data(preferred_date=formatted_date)
     await ask_time_slot(message, state)
 
-async def ask_time_slot(message: Message, state: FSMContext):
+
+async def ask_time_slot(
+    message: Message,
+    state: FSMContext,
+    edit_message: bool = False
+):
+    data = await state.get_data()
+
+    selected_date = data.get("preferred_date")
+    service_id = data.get("service_id")
+
+    slots = await get_available_slots(
+        selected_date=selected_date,
+        service_id=service_id
+    )
+
+    if not slots:
+        await state.set_state(BookingStates.choosing_date)
+
+        text = (
+            f"На {selected_date} свободного времени нет.\n\n"
+            "Выберите другую дату."
+        )
+
+        if edit_message:
+            await message.edit_text(
+                text,
+                reply_markup=date_keyboard()
+            )
+        else:
+            await message.answer(
+                text,
+                reply_markup=date_keyboard()
+            )
+        return
+
     await state.set_state(BookingStates.choosing_time)
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🌅 Утро 08:00–13:00", callback_data="time:Утро 08–13:00")],
-            [InlineKeyboardButton(text="☀️ День 13:00–17:00", callback_data="time:День 13:00–17:00")],
-            [InlineKeyboardButton(text="🌆 Вечер 17:00–20:00", callback_data="time:Вечер 17:00–20:00")],
-            [InlineKeyboardButton(text="⬅️ Изменить дату", callback_data="book:back_date")],
-            [InlineKeyboardButton(text="❌ Отменить", callback_data="book:cancel")],
+    buttons = []
+
+    for i in range(0, len(slots), 2):
+        row = [
+            InlineKeyboardButton(
+                text=slot,
+                callback_data=f"time:{slot}"
+            )
+            for slot in slots[i:i + 2]
         ]
+        buttons.append(row)
+
+    buttons.extend([
+        [
+            InlineKeyboardButton(
+                text="⬅️ Изменить дату",
+                callback_data="book:back_date"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="❌ Отменить",
+                callback_data="book:cancel"
+            )
+        ]
+    ])
+
+    text = (
+        f"📅 Дата: {selected_date}\n\n"
+        "Выберите свободное время:"
     )
 
-    await message.answer(
-        "Какой интервал вам подходит?",
-        reply_markup=keyboard
-    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    if edit_message:
+        await message.edit_text(text, reply_markup=keyboard)
+    else:
+        await message.answer(text, reply_markup=keyboard)
 
 
-@router.callback_query(BookingStates.choosing_time, F.data.startswith("time:"))
+
+@router.callback_query(
+    BookingStates.choosing_time,
+    F.data.startswith("time:")
+)
 async def choose_time(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
-    time_slot = callback.data.split(":", 1)[1]
+    start_time = callback.data.split(":", 1)[1]
+    data = await state.get_data()
 
-    await state.update_data(preferred_time_slot=time_slot)
+    # Повторно проверяем, что выбранное время ещё свободно.
+    slots = await get_available_slots(
+        selected_date=data.get("preferred_date"),
+        service_id=data.get("service_id")
+    )
+
+    if start_time not in slots:
+        await callback.message.edit_text(
+            "Это время уже недоступно. Выберите другое.",
+        )
+        await ask_time_slot(callback.message, state, edit_message=True)
+        return
+
+    service = await get_service(data.get("service_id"))
+
+    if not service:
+        await callback.message.edit_text("Услуга не найдена.")
+        await state.clear()
+        return
+
+    start_dt = datetime.strptime(start_time, "%H:%M")
+    end_dt = start_dt + timedelta(
+        minutes=service["duration_minutes"]
+    )
+
+    end_time = end_dt.strftime("%H:%M")
+
+    await state.update_data(
+        start_time=start_time,
+        end_time=end_time,
+        preferred_time_slot=f"{start_time}–{end_time}"
+    )
 
     data = await state.get_data()
+
     if data.get("name") and data.get("phone"):
         await show_contact_confirmation(callback.message, state)
     else:
@@ -394,14 +495,38 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         phone=data.get("phone"),
     )
 
-    booking_id = await create_booking_request(
-        client_id=client_id,
-        client_telegram_id=callback.from_user.id,
-        service_id=data.get("service_id"),
-        preferred_date=data.get("preferred_date"),
-        preferred_time_slot=data.get("preferred_time_slot"),
-        note=data.get("note"),
-    )
+    try:
+        booking_id = await create_booking_request(
+            client_id=client_id,
+            client_telegram_id=callback.from_user.id,
+            service_id=data.get("service_id"),
+            preferred_date=data.get("preferred_date"),
+            preferred_time_slot=data.get("preferred_time_slot"),
+            start_time=data.get("start_time"),
+            end_time=data.get("end_time"),
+            note=data.get("note"),
+        )
+
+    except ValueError as error:
+        if "Это время уже занято" in str(error):
+            # Слот заняли до подтверждения заявки.
+            await state.update_data(
+                start_time=None,
+                end_time=None,
+                preferred_time_slot=None,
+            )
+
+            await ask_time_slot(
+                callback.message,
+                state,
+                edit_message=True,
+            )
+        else:
+            await callback.message.edit_text(
+                f"Не удалось оформить запись: {error}"
+            )
+
+        return
 
     await state.clear()
 
@@ -803,8 +928,7 @@ async def admin_booking_card(callback: CallbackQuery):
         f"🕒 Интервал: {booking['preferred_time_slot']}\n\n"
         f"👤 Клиент: {booking['full_name'] or 'не указано'}\n"
         f"📞 Телефон: {booking['phone'] or 'не указан'}\n"
-        f"Telegram: {telegram_name}\n"
-        f"Telegram ID: {booking['client_telegram_id']}\n\n"
+        f"Telegram: {telegram_name}\n\n"
         f"💬 Комментарий: {booking['note'] or 'нет'}\n"
         f"Создана: {booking['created_at']}"
     )
