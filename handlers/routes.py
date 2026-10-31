@@ -4,14 +4,13 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardRemove
+    InlineKeyboardMarkup
 )
 from aiogram.fsm.context import FSMContext
 
-from keyboards.inline import main_menu, back_to_main_menu
+from keyboards.inline import main_menu, back_to_main_menu, admin_menu_keyboard
 from database.db import get_categories, get_services_by_category,get_service, get_client_bookings
-from config import OWNER_TELEGRAM_ID
+from config import OWNER_TELEGRAM_ID, ADMIN_TELEGRAM
 
 STATUS_LABELS = {
     "new": "⏳ Ожидает подтверждения",
@@ -28,7 +27,7 @@ async def cmd_start(message: Message, state: FSMContext):
     is_owner = message.from_user.id ==OWNER_TELEGRAM_ID
     await message.answer(
         f"Привет, <b>{message.from_user.first_name}</b>! 👋\n\n"
-        "Я бот студии «Beauty Studio».\n\n"
+        "Я бот студии «Косметолог Катерина».\n\n"
         "<b>Здесь можно:</b>\n"
         "• посмотреть услуги и цены\n"
         "• оставить заявку на запись\n"
@@ -215,9 +214,9 @@ async def show_contacts(callback: CallbackQuery):
         "📍 <b>Адрес:</b>\n"
         "Нижний Новгород, Кукуево, 67\n\n"
         "⏰ Часы работы:\n"
-        "Пн-Пт: 15.30 - 21.00\n"
-        "Сб: 8.00 - 21.00\n"
-        "Вс: выходной",
+        "Пн-Пт: 09:00 - 18:00\n"
+        "(13:00 - 14:00 - Обед)\n"
+        "Сб-Вс: выходной",
         reply_markup=back_to_main_menu()
     )
     await callback.answer()
@@ -235,7 +234,7 @@ async def show_faq(callback: CallbackQuery):
 async def show_contact(callback: CallbackQuery):
     await callback.message.edit_text(
         f"💬 <b>Связь</b>\n\n"
-        f"Если у вас остались вопросы, вы\nвсегда можете написать.",
+        f"Если у вас остались вопросы, вы\nвсегда можете написать <a href='{ADMIN_TELEGRAM}'>мне</a>.",
     reply_markup=back_to_main_menu()
     )
     await callback.answer()
@@ -314,7 +313,6 @@ async def admin_menu(message: Message):
 
     await message.answer(
         "🛠 <b>Админ-панель</b>\n\n"
-        "Пока доступны команды:\n"
-        "• /my_bookings — последние заявки\n"
-        "• /start — клиентское меню"
+        "Выберите раздел:",
+        reply_markup=admin_menu_keyboard()
     )

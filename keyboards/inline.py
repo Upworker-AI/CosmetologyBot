@@ -104,3 +104,88 @@ def date_keyboard():
     )
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def admin_menu_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📅 Расписание",
+                    callback_data="admin:schedule"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📋 Все заявки",
+                    callback_data="admin:bookings:all"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🆕 Новые",
+                    callback_data="admin:bookings:new"
+                ),
+                InlineKeyboardButton(
+                    text="✅ Подтверждённые",
+                    callback_data="admin:bookings:confirmed"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏁 Завершённые",
+                    callback_data="admin:bookings:completed"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отменённые",
+                    callback_data="admin:bookings:cancelled"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔍 По услуге",
+                    callback_data="admin:filter:service"
+                ),
+                InlineKeyboardButton(
+                    text="📆 По дате",
+                    callback_data="admin:filter:date"
+                )
+            ],
+        ]
+    )
+
+
+def admin_booking_keyboard(booking_id: int, status: str):
+    buttons = []
+
+    if status == "new":
+        buttons.append([
+            InlineKeyboardButton(
+                text="✅ Подтвердить",
+                callback_data=f"admin:confirm:{booking_id}"
+            ),
+            InlineKeyboardButton(
+                text="❌ Отменить",
+                callback_data=f"admin:cancel:{booking_id}"
+            )
+        ])
+
+    elif status == "confirmed":
+        buttons.append([
+            InlineKeyboardButton(
+                text="✅ Завершить",
+                callback_data=f"admin:complete:{booking_id}"
+            ),
+            InlineKeyboardButton(
+                text="❌ Отменить",
+                callback_data=f"admin:cancel:{booking_id}"
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ К списку заявок",
+            callback_data="admin:bookings:all"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
