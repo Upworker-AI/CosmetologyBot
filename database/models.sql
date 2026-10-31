@@ -103,23 +103,10 @@ INSERT OR IGNORE INTO working_hours (
     end_time
 )
 VALUES
-    (0, 1, "09:00", "15:00"),
-    (1, 0, NULL, NULL),
-    (2, 0, NULL, NULL),
-    (3, 0, NULL, NULL),
-    (4, 0, NULL, NULL),
+    (0, 1, '09:00', '18:00'),
+    (1, 1, '09:00', '18:00'),
+    (2, 1, '09:00', '18:00'),
+    (3, 1, '09:00', '18:00'),
+    (4, 1, '09:00', '18:00'),
     (5, 0, NULL, NULL),
     (6, 0, NULL, NULL);
-
-INSERT INTO working_breaks(
-    weekday,
-    start_time,
-    end_time,
-    title
-)
-VALUES (
-    0,
-    "13:00",
-    "14:00",
-    "Обед"
-);

@@ -7,11 +7,10 @@ from aiogram.types import (
     InlineKeyboardMarkup
 )
 from aiogram.fsm.context import FSMContext
-from pyexpat.errors import messages
 
 from keyboards.inline import main_menu, back_to_main_menu, admin_menu_keyboard
 from database.db import get_categories, get_services_by_category,get_service, get_client_bookings
-from config import OWNER_TELEGRAM_ID
+from config import OWNER_TELEGRAM_ID, ADMIN_TELEGRAM
 
 STATUS_LABELS = {
     "new": "⏳ Ожидает подтверждения",
@@ -215,9 +214,9 @@ async def show_contacts(callback: CallbackQuery):
         "📍 <b>Адрес:</b>\n"
         "Нижний Новгород, Кукуево, 67\n\n"
         "⏰ Часы работы:\n"
-        "Пн-Пт: 15.30 - 21.00\n"
-        "Сб: 8.00 - 21.00\n"
-        "Вс: выходной",
+        "Пн-Пт: 09:00 - 18:00\n"
+        "(13:00 - 14:00 - Обед)\n"
+        "Сб-Вс: выходной",
         reply_markup=back_to_main_menu()
     )
     await callback.answer()
@@ -235,7 +234,7 @@ async def show_faq(callback: CallbackQuery):
 async def show_contact(callback: CallbackQuery):
     await callback.message.edit_text(
         f"💬 <b>Связь</b>\n\n"
-        f"Если у вас остались вопросы, вы\nвсегда можете написать.",
+        f"Если у вас остались вопросы, вы\nвсегда можете написать <a href='{ADMIN_TELEGRAM}'>мне</a>.",
     reply_markup=back_to_main_menu()
     )
     await callback.answer()

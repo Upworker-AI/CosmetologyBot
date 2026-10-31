@@ -77,7 +77,17 @@ async def seed_schedule(db):
     )
 
     # Добавляем обед в понедельник, только если такого перерыва ещё нет.
-    await db.execute(
+    BREAKS = [
+        (0, "13:00", "14:00", "Обед"),
+        (1, "13:00", "14:00", "Обед"),
+        (2, "13:00", "14:00", "Обед"),
+        (3, "13:00", "14:00", "Обед"),
+        (4, "13:00", "14:00", "Обед"),
+        (5, "13:00", "15:00", "Обед"),
+        (6, "13:00", "15:00", "Обед"),
+    ]
+
+    await db.executemany(
         """
         INSERT INTO working_breaks (
             weekday,
@@ -85,15 +95,21 @@ async def seed_schedule(db):
             end_time,
             title
         )
-        SELECT 0, '13:00', '14:00', 'Обед'
+        SELECT ?, ?, ?, ?
         WHERE NOT EXISTS (
             SELECT 1
             FROM working_breaks
-            WHERE weekday = 0
-              AND start_time = '13:00'
-              AND end_time = '14:00'
+            WHERE weekday = ?
+              AND start_time = ?
+              AND end_time = ?
+              AND title = ?
         )
-        """
+        """,
+        [
+            (weekday, start_time, end_time, title,
+             weekday, start_time, end_time, title)
+            for weekday, start_time, end_time, title in BREAKS
+        ]
     )
 
     # Настройки временных слотов.

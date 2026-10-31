@@ -25,6 +25,8 @@ from database.db import (
     get_admin_services,
     get_available_slots
 )
+from aiogram.exceptions import TelegramBadRequest
+
 router = Router()
 
 
@@ -226,10 +228,19 @@ async def ask_time_slot(
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     if edit_message:
-        await message.edit_text(text, reply_markup=keyboard)
+        try:
+            await message.edit_text(
+                text,
+                reply_markup=keyboard
+            )
+        except TelegramBadRequest as error:
+            if "message is not modified" not in str(error):
+                raise
     else:
-        await message.answer(text, reply_markup=keyboard)
-
+        await message.answer(
+            text,
+            reply_markup=keyboard
+        )
 
 
 @router.callback_query(
@@ -620,6 +631,7 @@ async def admin_confirm(callback: CallbackQuery):
     await callback.answer("Заявка подтверждена!")
 
     booking = await get_admin_booking_details(booking_id)
+    username = callback.from_user.username or "нет"
 
     text = (
         f"📋 <b>Заявка #{booking['id']}</b>\n\n"
@@ -632,6 +644,7 @@ async def admin_confirm(callback: CallbackQuery):
         f"🕒 Интервал: {booking['preferred_time_slot']}\n\n"
         f"👤 Клиент: {booking['full_name'] or 'не указано'}\n"
         f"📞 Телефон: {booking['phone'] or 'не указан'}\n"
+        f"Telegram: @{username}\n"
         f"💬 Комментарий: {booking['note'] or 'нет'}"
     )
 
