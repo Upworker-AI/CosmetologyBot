@@ -499,14 +499,14 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
 
     data = await state.get_data()
 
-    client_id = await get_or_create_client(
-        telegram_id=callback.from_user.id,
-        username=callback.from_user.username,
-        full_name=data.get("name"),
-        phone=data.get("phone"),
-    )
-
     try:
+        client_id = await get_or_create_client(
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            full_name=data.get("name"),
+            phone=data.get("phone"),
+        )
+
         booking_id = await create_booking_request(
             client_id=client_id,
             client_telegram_id=callback.from_user.id,
@@ -519,24 +519,17 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         )
 
     except ValueError as error:
-        if "Это время уже занято" in str(error):
-            # Слот заняли до подтверждения заявки.
-            await state.update_data(
-                start_time=None,
-                end_time=None,
-                preferred_time_slot=None,
-            )
+        # Если другой клиент успел занять время.
+        await callback.message.edit_text(
+            f"⚠️ {error}\n\n"
+            "Выберите другое свободное время."
+        )
 
-            await ask_time_slot(
-                callback.message,
-                state,
-                edit_message=True,
-            )
-        else:
-            await callback.message.edit_text(
-                f"Не удалось оформить запись: {error}"
-            )
-
+        await ask_time_slot(
+            callback.message,
+            state,
+            edit_message=False
+        )
         return
 
     await state.clear()
@@ -548,6 +541,7 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext):
         f"Время: {data.get('preferred_time_slot')}\n\n"
         "Мастер свяжется с вами для подтверждения."
     )
+
     await notify_owner(
         bot=callback.bot,
         booking_id=booking_id,
@@ -748,7 +742,9 @@ async def admin_cancel(callback: CallbackQuery):
 @router.callback_query(F.data == "admin:panel")
 async def admin_panel(callback: CallbackQuery):
     if callback.from_user.id != OWNER_TELEGRAM_ID:
-        await callback.answer("Доступ только для владельца.", show_alert=True)
+        await callback.answer(
+            "Доступ только для владельца.",
+            show_alert=True)
         return
 
     await callback.answer()
@@ -992,6 +988,7 @@ async def admin_schedule(callback: CallbackQuery):
         return
 
     lines = ["📅 <b>Расписание</b>\n"]
+    booking_buttons = []
     buttons = []
     current_date = None
 
@@ -1009,12 +1006,14 @@ async def admin_schedule(callback: CallbackQuery):
             f"(заявка #{booking['id']}, {booking['status']})"
         )
 
-        buttons.append([
+        booking_buttons.append(
             InlineKeyboardButton(
                 text=f"Открыть #{booking['id']}",
                 callback_data=f"admin:booking:{booking['id']}"
             )
-        ])
+        )
+    for i in range(0, len(booking_buttons), 2):
+        buttons.append(booking_buttons[i:i+2])
 
     buttons.append([
         InlineKeyboardButton(
