@@ -8,10 +8,19 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     KeyboardButton,
-    ReplyKeyboardRemove
 )
 from datetime import datetime, timedelta
-from keyboards.inline import back_to_main_menu, date_keyboard, admin_menu_keyboard, admin_booking_keyboard
+from keyboards.inline import (
+    back_to_main_menu,
+    date_keyboard,
+    admin_menu_keyboard,
+    admin_booking_keyboard,
+    schedule_menu_keyboard,
+    break_list_keyboard,
+    breaks_menu_keyboard,
+    break_weekdays_keyboard,
+    break_conflict_keyboard
+)
 from config import OWNER_TELEGRAM_ID
 from database.db import (
     get_service,
@@ -23,7 +32,16 @@ from database.db import (
     get_admin_bookings,
     get_admin_booking_details,
     get_admin_services,
-    get_available_slots
+    get_available_slots,
+    get_working_hours,
+    update_working_hours,
+    get_schedule_conflicts,
+    get_working_breaks,
+    get_date_breaks,
+    add_working_break,
+    delete_working_break,
+    add_date_break,
+    delete_date_break,
 )
 from aiogram.exceptions import TelegramBadRequest
 
@@ -41,6 +59,563 @@ class BookingStates(StatesGroup):
 
 class AdminFilterStates(StatesGroup):
     entering_date = State()
+
+class AdminBreakStates(StatesGroup):
+    entering_date = State()
+    entering_start_time = State()
+    entering_end_time = State()
+    confirming_conflicts = State()
+
+class AdminScheduleStates(StatesGroup):
+    entering_start_time = State()
+    entering_end_time = State()
+    confirming_change = State()
+WEEKDAYS = {
+    0: "Понедельник",
+    1: "Вторник",
+    2: "Среда",
+    3: "Четверг",
+    4: "Пятница",
+    5: "Суббота",
+    6: "Воскресенье",
+}
+
+
+def working_hours_keyboard():
+    buttons = []
+
+    weekdays = list(WEEKDAYS.items())
+
+    # Размещаем дни недели по два в строке
+    for i in range(0, len(weekdays), 2):
+        row = []
+
+        for weekday, name in weekdays[i:i + 2]:
+            row.append(
+                InlineKeyboardButton(
+                    text=name,
+                    callback_data=f"admin:working_hours:day:{weekday}"
+                )
+            )
+
+        buttons.append(row)
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data="admin:schedule"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def working_day_keyboard(weekday: int, is_working: int):
+    buttons = []
+
+    if is_working:
+        buttons.append([
+            InlineKeyboardButton(
+                text="🔴 Сделать выходным",
+                callback_data=f"admin:working_hours:toggle:{weekday}"
+            )
+        ])
+    else:
+        buttons.append([
+            InlineKeyboardButton(
+                text="🟢 Сделать рабочим",
+                callback_data=f"admin:working_hours:toggle:{weekday}"
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="🕒 Изменить время работы",
+            callback_data=f"admin:working_hours:edit:{weekday}"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ К дням недели",
+            callback_data="admin:schedule:working_hours"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def schedule_conflicts_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить изменение",
+                    callback_data="admin:working_hours:apply"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="admin:working_hours:cancel"
+                )
+            ]
+        ]
+    )
+
+
+async def show_schedule_conflicts(
+    message: Message,
+    state: FSMContext,
+    weekday: int,
+    is_working: int,
+    start_time: str,
+    end_time: str,
+    conflicts: list
+):
+    await state.update_data(
+        pending_weekday=weekday,
+        pending_is_working=is_working,
+        pending_start_time=start_time,
+        pending_end_time=end_time,
+    )
+
+    await state.set_state(AdminScheduleStates.confirming_change)
+
+    lines = [
+        "⚠️ <b>Изменение расписания затронет существующие записи!</b>\n",
+        "Следующие заявки окажутся за пределами нового графика:\n"
+    ]
+
+    for booking in conflicts[:15]:
+        lines.append(
+            f"📋 <b>Заявка #{booking['id']}</b>\n"
+            f"📅 Дата: {booking['preferred_date']}\n"
+            f"🕒 Время: {booking['preferred_time_slot']}\n"
+            f"✂️ Услуга: {booking['service_title'] or 'не указана'}\n"
+            f"👤 Клиент: {booking['full_name'] or 'не указан'}\n"
+        )
+
+    if len(conflicts) > 15:
+        lines.append(
+            f"\nИ ещё {len(conflicts) - 15} заявок."
+        )
+
+    lines.append(
+        "\n<b>Важно:</b> подтверждение изменит только рабочий график. "
+        "Заявки не будут удалены или отменены."
+    )
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=schedule_conflicts_keyboard()
+    )
+
+@router.callback_query(F.data == "admin:schedule:working_hours")
+async def show_working_hours(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer(
+            "Доступ только для владельца.",
+            show_alert=True
+        )
+        return
+
+    await callback.answer()
+
+    lines = ["🕒 <b>Рабочий график</b>\n"]
+
+    for weekday, name in WEEKDAYS.items():
+        hours = await get_working_hours(weekday)
+
+        if hours is None:
+            lines.append(f"⚠️ {name} — настройки отсутствуют")
+            continue
+
+        if hours["is_working"]:
+            lines.append(
+                f"🟢 {name} — "
+                f"{hours['start_time']}–{hours['end_time']}"
+            )
+        else:
+            lines.append(f"🔴 {name} — выходной")
+
+    await callback.message.edit_text(
+        "\n".join(lines) + "\n\nВыберите день для настройки:",
+        reply_markup=working_hours_keyboard()
+    )
+
+@router.callback_query(F.data.startswith("admin:working_hours:day:"))
+async def show_working_day(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer(
+            "Доступ только для владельца.",
+            show_alert=True
+        )
+        return
+
+    await callback.answer()
+
+    weekday = int(callback.data.split(":")[-1])
+    hours = await get_working_hours(weekday)
+
+    if hours is None:
+        await callback.message.edit_text(
+            "Настройки этого дня не найдены.",
+            reply_markup=working_hours_keyboard()
+        )
+        return
+
+    name = WEEKDAYS[weekday]
+
+    if hours["is_working"]:
+        status = (
+            f"🟢 Рабочий день\n"
+            f"Начало: {hours['start_time']}\n"
+            f"Окончание: {hours['end_time']}"
+        )
+    else:
+        status = "🔴 Выходной"
+
+    await callback.message.edit_text(
+        f"🕒 <b>{name}</b>\n\n"
+        f"{status}\n\n"
+        "Выберите действие:",
+        reply_markup=working_day_keyboard(
+            weekday,
+            hours["is_working"]
+        )
+    )
+
+@router.callback_query(F.data.startswith("admin:working_hours:toggle:"))
+async def toggle_working_day(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer(
+            "Доступ только для владельца.",
+            show_alert=True
+        )
+        return
+
+    weekday = int(callback.data.split(":")[-1])
+    hours = await get_working_hours(weekday)
+
+    if hours is None:
+        await callback.answer(
+            "Настройки дня не найдены.",
+            show_alert=True
+        )
+        return
+
+    new_status = 0 if hours["is_working"] else 1
+
+    # Нельзя включить рабочий день без заданных часов.
+    if new_status and (
+        not hours["start_time"] or not hours["end_time"]
+    ):
+        await callback.answer(
+            "Сначала установите время работы этого дня.",
+            show_alert=True
+        )
+        return
+
+    # Если делаем день выходным, проверяем существующие записи.
+    if not new_status:
+        conflicts = await get_schedule_conflicts(
+            weekday=weekday,
+            is_working=0,
+            start_time=hours["start_time"],
+            end_time=hours["end_time"],
+        )
+
+        if conflicts:
+            await callback.answer()
+            await show_schedule_conflicts(
+                message=callback.message,
+                state=state,
+                weekday=weekday,
+                is_working=0,
+                start_time=hours["start_time"],
+                end_time=hours["end_time"],
+                conflicts=conflicts,
+            )
+            return
+
+    await update_working_hours(
+        weekday=weekday,
+        is_working=new_status,
+        start_time=hours["start_time"],
+        end_time=hours["end_time"],
+    )
+
+    await callback.answer(
+        "День стал выходным." if not new_status
+        else "День стал рабочим."
+    )
+
+    name = WEEKDAYS[weekday]
+
+    if new_status:
+        status = (
+            f"🟢 Рабочий день\n"
+            f"Начало: {hours['start_time']}\n"
+            f"Окончание: {hours['end_time']}"
+        )
+    else:
+        status = "🔴 Выходной"
+
+    await callback.message.edit_text(
+        f"🕒 <b>{name}</b>\n\n"
+        f"{status}\n\n"
+        "Выберите действие:",
+        reply_markup=working_day_keyboard(weekday, new_status)
+    )
+
+@router.callback_query(F.data.startswith("admin:working_hours:edit:"))
+async def edit_working_hours(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer(
+            "Доступ только для владельца.",
+            show_alert=True
+        )
+        return
+
+    await callback.answer()
+
+    weekday = int(callback.data.split(":")[-1])
+
+    await state.update_data(weekday=weekday)
+    await state.set_state(AdminScheduleStates.entering_start_time)
+
+    await callback.message.edit_text(
+        f"🕒 <b>{WEEKDAYS[weekday]}</b>\n\n"
+        "Введите время начала работы в формате ЧЧ:ММ.\n\n"
+        "Например: 09:00",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отмена",
+                        callback_data=f"admin:working_hours:day:{weekday}"
+                    )
+                ]
+            ]
+        )
+    )
+
+@router.message(AdminScheduleStates.entering_start_time)
+async def enter_working_start_time(message: Message, state: FSMContext):
+    if message.from_user.id != OWNER_TELEGRAM_ID:
+        return
+
+    try:
+        start_time = datetime.strptime(message.text.strip(), "%H:%M")
+    except (ValueError, AttributeError):
+        await message.answer(
+            "Некорректное время.\n"
+            "Введите время в формате ЧЧ:ММ, например 09:00."
+        )
+        return
+
+    await state.update_data(
+        start_time=start_time.strftime("%H:%M")
+    )
+
+    data = await state.get_data()
+    weekday = data["weekday"]
+
+    await state.set_state(AdminScheduleStates.entering_end_time)
+
+    await message.answer(
+        f"Начало работы: {start_time.strftime('%H:%M')}\n\n"
+        "Теперь введите время окончания работы.\n\n"
+        "Например: 18:00"
+    )
+
+@router.message(AdminScheduleStates.entering_end_time)
+async def enter_working_end_time(
+    message: Message,
+    state: FSMContext
+):
+    if message.from_user.id != OWNER_TELEGRAM_ID:
+        return
+
+    try:
+        end_time = datetime.strptime(
+            message.text.strip(), "%H:%M"
+        )
+    except (ValueError, AttributeError):
+        await message.answer(
+            "Некорректное время.\n"
+            "Введите время в формате ЧЧ:ММ, например 18:00."
+        )
+        return
+
+    data = await state.get_data()
+
+    start_time = data["start_time"]
+    weekday = data["weekday"]
+    end_time_str = end_time.strftime("%H:%M")
+
+    if end_time <= datetime.strptime(start_time, "%H:%M"):
+        await message.answer(
+            "Время окончания должно быть позже времени начала.\n"
+            "Попробуйте ещё раз."
+        )
+        return
+
+    hours = await get_working_hours(weekday)
+    is_working = hours["is_working"] if hours else 1
+
+    # Проверяем, не выйдут ли записи за новые часы работы.
+    if is_working:
+        conflicts = await get_schedule_conflicts(
+            weekday=weekday,
+            is_working=1,
+            start_time=start_time,
+            end_time=end_time_str,
+        )
+
+        if conflicts:
+            await show_schedule_conflicts(
+                message=message,
+                state=state,
+                weekday=weekday,
+                is_working=1,
+                start_time=start_time,
+                end_time=end_time_str,
+                conflicts=conflicts,
+            )
+            return
+
+    # Конфликтов нет — сохраняем сразу.
+    await update_working_hours(
+        weekday=weekday,
+        is_working=is_working,
+        start_time=start_time,
+        end_time=end_time_str,
+    )
+
+    await state.clear()
+
+    updated_hours = await get_working_hours(weekday)
+
+    if updated_hours["is_working"]:
+        status = (
+            f"🟢 Рабочий день\n"
+            f"Начало: {updated_hours['start_time']}\n"
+            f"Окончание: {updated_hours['end_time']}"
+        )
+    else:
+        status = (
+            "🔴 Выходной\n"
+            f"Сохранённые часы: "
+            f"{updated_hours['start_time']}–{updated_hours['end_time']}"
+        )
+
+    await message.answer(
+        f"✅ <b>Расписание сохранено!</b>\n\n"
+        f"{WEEKDAYS[weekday]}\n"
+        f"{status}",
+        reply_markup=working_day_keyboard(
+            weekday,
+            updated_hours["is_working"]
+        )
+    )
+
+@router.callback_query(
+    F.data == "admin:working_hours:apply",
+    AdminScheduleStates.confirming_change
+)
+async def apply_schedule_change(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+
+    weekday = data.get("pending_weekday")
+    is_working = data.get("pending_is_working")
+    start_time = data.get("pending_start_time")
+    end_time = data.get("pending_end_time")
+
+    # Проверяем, что ожидающее изменение действительно сохранено
+    if weekday is None or is_working is None:
+        await callback.answer(
+            "Не удалось применить изменение. Попробуйте ещё раз.",
+            show_alert=True
+        )
+        await state.clear()
+        return
+
+    # Применяем расписание, несмотря на найденные записи
+    await update_working_hours(
+        weekday=weekday,
+        is_working=is_working,
+        start_time=start_time,
+        end_time=end_time
+    )
+
+    await state.clear()
+
+    await callback.answer("Расписание успешно изменено!")
+
+    # Обновляем существующее сообщение, а не отправляем новое
+    await callback.message.edit_text(
+        "Расписание успешно изменено!",
+        reply_markup=admin_menu_keyboard()
+    )
+
+@router.callback_query(
+    AdminScheduleStates.confirming_change,
+    F.data == "admin:working_hours:cancel"
+)
+async def cancel_schedule_change(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer(
+            "Доступ только для владельца.",
+            show_alert=True
+        )
+        return
+
+    data = await state.get_data()
+    weekday = data.get("pending_weekday")
+
+    await state.clear()
+    await callback.answer("Изменение отменено.")
+
+    if weekday is None:
+        await callback.message.edit_text(
+            "Изменение расписания отменено.",
+            reply_markup=working_hours_keyboard()
+        )
+        return
+
+    hours = await get_working_hours(weekday)
+
+    if hours is None:
+        await callback.message.edit_text(
+            "Настройки этого дня не найдены.",
+            reply_markup=working_hours_keyboard()
+        )
+        return
+
+    if hours["is_working"]:
+        status = (
+            f"🟢 Рабочий день\n"
+            f"Начало: {hours['start_time']}\n"
+            f"Окончание: {hours['end_time']}"
+        )
+    else:
+        status = "🔴 Выходной"
+
+    await callback.message.edit_text(
+        f"🕒 <b>{WEEKDAYS[weekday]}</b>\n\n"
+        f"{status}\n\n"
+        "Изменение отменено. Старое расписание сохранено.",
+        reply_markup=working_day_keyboard(
+            weekday,
+            hours["is_working"]
+        )
+    )
 
 @router.callback_query(F.data.startswith("book:start:"))
 async def start_booking(callback: CallbackQuery, state: FSMContext):
@@ -950,9 +1525,663 @@ async def admin_booking_card(callback: CallbackQuery):
         )
     )
 
-
 @router.callback_query(F.data == "admin:schedule")
-async def admin_schedule(callback: CallbackQuery):
+async def show_schedule_menu(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer(
+            "Доступ только для владельца.",
+            show_alert=True
+        )
+        return
+
+    await callback.answer()
+
+    await callback.message.edit_text(
+        "📅 <b>Расписание</b>\n\n"
+        "Выберите действие:",
+        reply_markup=schedule_menu_keyboard()
+    )
+
+
+@router.callback_query(F.data == "admin:schedule:breaks")
+async def show_breaks_menu(callback: CallbackQuery):
+    await callback.answer()
+
+    await callback.message.edit_text(
+        "☕ <b>Управление перерывами</b>\n\n"
+        "Выберите тип перерывов:",
+        reply_markup=breaks_menu_keyboard()
+    )
+
+
+@router.callback_query(F.data == "admin:breaks:weekly")
+async def show_weekly_breaks(callback: CallbackQuery):
+    await callback.answer()
+
+    await callback.message.edit_text(
+        "🔁 <b>Еженедельные перерывы</b>\n\n"
+        "Выберите день недели:",
+        reply_markup=break_weekdays_keyboard()
+    )
+
+
+@router.callback_query(F.data.startswith("admin:breaks:weekday:"))
+async def show_weekday_breaks(callback: CallbackQuery):
+    await callback.answer()
+
+    weekday = int(callback.data.split(":")[-1])
+
+    breaks = await get_working_breaks(weekday)
+
+    weekday_name = WEEKDAYS[weekday]
+
+    if breaks:
+        text = (
+            f"☕ <b>Перерывы: {weekday_name}</b>\n\n"
+            "Нажмите на перерыв, чтобы удалить его:"
+        )
+    else:
+        text = (
+            f"☕ <b>Перерывы: {weekday_name}</b>\n\n"
+            "На этот день перерывов пока нет."
+        )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=break_list_keyboard(
+            breaks,
+            f"weekly_{weekday}",
+            "admin:breaks:weekly"
+        )
+    )
+
+
+@router.callback_query(F.data == "admin:breaks:date")
+async def start_date_breaks(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+
+    await state.set_state(AdminBreakStates.entering_date)
+
+    await callback.message.edit_text(
+        "📅 <b>Перерывы на конкретную дату</b>\n\n"
+        "Введите дату в формате ДД.ММ.ГГГГ.\n"
+        "Например: 15.11.2026",
+        reply_markup=breaks_menu_keyboard()
+    )
+def format_date_breaks_text(date_obj, weekly_breaks, date_breaks, prefix=None):
+    date_display = date_obj.strftime("%d.%m.%Y")
+
+    lines = []
+
+    if prefix:
+        lines.extend([prefix, ""])
+
+    lines.extend([
+        f"☕ <b>Перерывы на {date_display}</b>",
+        "",
+        "🔁 <b>Еженедельные перерывы:</b>"
+    ])
+
+    if weekly_breaks:
+        for item in weekly_breaks:
+            title = item.get("title") or "Перерыв"
+            lines.append(
+                f"• {item['start_time']}–{item['end_time']} — {title}"
+            )
+    else:
+        lines.append("• Нет еженедельных перерывов")
+
+    lines.extend([
+        "",
+        "📅 <b>Разовые перерывы:</b>"
+    ])
+
+    if date_breaks:
+        for item in date_breaks:
+            title = item.get("title") or "Перерыв"
+            lines.append(
+                f"• {item['start_time']}–{item['end_time']} — {title}"
+            )
+    else:
+        lines.append("• Нет разовых перерывов")
+
+    lines.extend([
+        "",
+        "Нажмите на разовый перерыв ниже, чтобы удалить его."
+    ])
+
+    return "\n".join(lines)
+
+@router.message(AdminBreakStates.entering_date)
+async def show_date_breaks(message: Message, state: FSMContext):
+    try:
+        selected_date = datetime.strptime(
+            message.text.strip(), "%d.%m.%Y"
+        ).date()
+
+        date_iso = selected_date.strftime("%Y-%m-%d")
+
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат даты.\n"
+            "Введите дату в формате ДД.ММ.ГГГГ."
+        )
+        return
+
+    await state.clear()
+
+    # Получаем еженедельные перерывы для выбранного дня недели
+    weekday = selected_date.weekday()
+    weekly_breaks = await get_working_breaks(weekday)
+
+    # Получаем разовые перерывы для выбранной даты
+    date_breaks = await get_date_breaks(date_iso)
+
+    text = format_date_breaks_text(
+        selected_date,
+        weekly_breaks,
+        date_breaks
+    )
+
+    await message.answer(
+        text,
+        reply_markup=break_list_keyboard(
+            date_breaks,
+            f"date_{date_iso}",
+            "admin:breaks:date"
+        )
+    )
+
+
+@router.callback_query(F.data.startswith("admin:breaks:add:"))
+async def start_adding_break(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    await callback.answer()
+
+    # Получаем тип перерыва из callback_data
+    break_type = callback.data.split(":", 3)[3]
+
+    # Еженедельный перерыв
+    if break_type.startswith("weekly_"):
+        weekday = int(break_type.split("_")[1])
+
+        await state.update_data(
+            break_type="weekly",
+            weekday=weekday
+        )
+
+    # Поддержка старого варианта callback_data
+    elif break_type == "weekly":
+        await callback.message.edit_text(
+            "❌ Не удалось определить день недели. "
+            "Вернитесь к выбору дня и попробуйте снова."
+        )
+        return
+
+    # Перерыв на конкретную дату
+    elif break_type.startswith("date_"):
+        date_iso = break_type.replace("date_", "", 1)
+
+        await state.update_data(
+            break_type="date",
+            date=date_iso
+        )
+
+    else:
+        await callback.message.answer(
+            f"Неизвестный тип перерыва: {break_type}"
+        )
+        return
+
+    await state.set_state(
+        AdminBreakStates.entering_start_time
+    )
+
+    await callback.message.edit_text(
+        "➕ <b>Добавление перерыва</b>\n\n"
+        "Введите время начала в формате ЧЧ:ММ.\n"
+        "Например: 13:00"
+    )
+
+async def save_break_and_show(
+    message: Message,
+    state: FSMContext,
+    data: dict
+):
+    start_time = data["start_time"]
+    end_time = data["end_time"]
+
+    if data["break_type"] == "weekly":
+        weekday = data["weekday"]
+
+        await add_working_break(
+            weekday=weekday,
+            start_time=start_time,
+            end_time=end_time
+        )
+
+        await state.clear()
+
+        breaks = await get_working_breaks(weekday)
+        weekday_name = WEEKDAYS[weekday]
+
+        await message.answer(
+            f"✅ Перерыв добавлен!\n\n"
+            f"День: {weekday_name}\n"
+            f"Время: {start_time}–{end_time}",
+            reply_markup=break_list_keyboard(
+                breaks,
+                f"weekly_{weekday}",
+                "admin:breaks:weekly"
+            )
+        )
+
+    else:
+        date_iso = data["date"]
+
+        await add_date_break(
+            date=date_iso,
+            start_time=start_time,
+            end_time=end_time
+        )
+
+        await state.clear()
+
+        date_obj = datetime.strptime(
+            date_iso, "%Y-%m-%d"
+        ).date()
+
+        weekly_breaks = await get_working_breaks(
+            date_obj.weekday()
+        )
+        date_breaks = await get_date_breaks(date_iso)
+
+        text = format_date_breaks_text(
+            date_obj,
+            weekly_breaks,
+            date_breaks,
+            prefix=(
+                f"✅ Перерыв добавлен!\n"
+                f"Время: {start_time}–{end_time}"
+            )
+        )
+
+        await message.answer(
+            text,
+            reply_markup=break_list_keyboard(
+                date_breaks,
+                f"date_{date_iso}",
+                "admin:breaks:date"
+            )
+        )
+
+
+@router.message(AdminBreakStates.entering_start_time)
+async def enter_break_start_time(
+    message: Message,
+    state: FSMContext
+):
+    try:
+        start_time = datetime.strptime(
+            message.text.strip(),
+            "%H:%M"
+        ).strftime("%H:%M")
+
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат времени.\n"
+            "Введите время, например: 13:00"
+        )
+        return
+
+    # Сохраняем время начала перерыва
+    await state.update_data(
+        start_time=start_time
+    )
+
+    # Переходим к вводу времени окончания
+    await state.set_state(
+        AdminBreakStates.entering_end_time
+    )
+
+    await message.answer(
+        "Введите время окончания перерыва.\n"
+        "Например: 14:00"
+    )
+
+
+@router.message(AdminBreakStates.entering_end_time)
+async def enter_break_end_time(
+    message: Message,
+    state: FSMContext
+):
+    try:
+        end_time = datetime.strptime(
+            message.text.strip(),
+            "%H:%M"
+        ).strftime("%H:%M")
+
+    except ValueError:
+        await message.answer(
+            "❌ Неверный формат времени.\n"
+            "Введите время, например: 14:00"
+        )
+        return
+
+    data = await state.get_data()
+
+    start_time = data["start_time"]
+
+    if end_time <= start_time:
+        await message.answer(
+            "❌ Время окончания должно быть позже "
+            "времени начала.\n"
+            "Введите время окончания ещё раз."
+        )
+        return
+
+    # Сохраняем окончание перерыва в FSM
+    await state.update_data(end_time=end_time)
+
+    data = await state.get_data()
+
+    try:
+
+        # ==================================
+        # ЕЖЕНЕДЕЛЬНЫЙ ПЕРЕРЫВ
+        # ==================================
+
+        if data["break_type"] == "weekly":
+
+            weekday = data["weekday"]
+
+            conflicts = await get_schedule_conflicts(
+                weekday=weekday,
+                is_working=1,
+                check_break=True,
+                break_start=start_time,
+                break_end=end_time
+            )
+
+        # ==================================
+        # РАЗОВЫЙ ПЕРЕРЫВ
+        # ==================================
+
+        else:
+
+            date_iso = data["date"]
+
+            date_obj = datetime.strptime(
+                date_iso, "%Y-%m-%d"
+            ).date()
+
+            conflicts = await get_schedule_conflicts(
+                weekday=date_obj.weekday(),
+                is_working=1,
+                check_break=True,
+                break_start=start_time,
+                break_end=end_time,
+                target_date=date_iso
+            )
+
+        # ==================================
+        # ЕСЛИ ЕСТЬ КОНФЛИКТЫ
+        # ==================================
+
+        if conflicts:
+
+            await state.set_state(
+                AdminBreakStates.confirming_conflicts
+            )
+
+            lines = [
+                "⚠️ <b>Обнаружены конфликты с записями!</b>",
+                "",
+                f"Новый перерыв: <b>{start_time}–{end_time}</b>",
+                "",
+                "Найдены следующие записи:"
+            ]
+
+            for booking in conflicts:
+
+                client_name = (
+                    booking["full_name"] or "Не указано"
+                )
+
+                service_name = (
+                    booking["service_title"] or "Не указана"
+                )
+
+                lines.extend([
+                    "",
+                    f"📅 <b>{booking['preferred_date']}</b>",
+                    f"👤 Клиент: {client_name}",
+                    f"💅 Услуга: {service_name}",
+                    f"🕒 Время: "
+                    f"{booking['start_time']}–{booking['end_time']}",
+                    f"📌 Заявка №{booking['id']}"
+                ])
+
+            lines.extend([
+                "",
+                "Если продолжить, перерыв будет добавлен, "
+                "но существующие записи останутся без изменений.",
+                "",
+                "<b>Добавить перерыв всё равно?</b>"
+            ])
+
+            await message.answer(
+                "\n".join(lines),
+                reply_markup=break_conflict_keyboard()
+            )
+
+            return
+
+        # ==================================
+        # ЕСЛИ КОНФЛИКТОВ НЕТ
+        # ==================================
+
+        await save_break_and_show(
+            message,
+            state,
+            data
+        )
+
+    except ValueError as error:
+
+        await message.answer(
+            f"❌ Не удалось добавить перерыв: {error}\n\n"
+            "Попробуйте ввести другое время начала."
+        )
+
+        await state.set_state(
+            AdminBreakStates.entering_start_time
+        )
+
+
+
+@router.callback_query(
+    AdminBreakStates.confirming_conflicts,
+    F.data == "admin:breaks:conflicts:confirm"
+)
+async def confirm_break_with_conflicts(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    data = await state.get_data()
+
+    try:
+        await save_break_and_show(
+            callback.message,
+            state,
+            data
+        )
+
+        await callback.answer("Перерыв добавлен!")
+
+    except ValueError as error:
+        await callback.answer(
+            f"Не удалось добавить перерыв: {error}",
+            show_alert=True
+        )
+
+@router.callback_query(
+    AdminBreakStates.confirming_conflicts,
+    F.data == "admin:breaks:conflicts:cancel"
+)
+async def cancel_break_with_conflicts(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    data = await state.get_data()
+
+    await state.clear()
+
+    if data["break_type"] == "weekly":
+
+        weekday = data["weekday"]
+
+        breaks = await get_working_breaks(weekday)
+
+        await callback.message.edit_text(
+            f"❌ Добавление перерыва отменено.\n\n"
+            f"Еженедельные перерывы — {WEEKDAYS[weekday]}:",
+            reply_markup=break_list_keyboard(
+                breaks,
+                f"weekly_{weekday}",
+                "admin:breaks:weekly"
+            )
+        )
+
+    else:
+
+        date_iso = data["date"]
+
+        date_obj = datetime.strptime(
+            date_iso, "%Y-%m-%d"
+        ).date()
+
+        weekly_breaks = await get_working_breaks(
+            date_obj.weekday()
+        )
+
+        date_breaks = await get_date_breaks(date_iso)
+
+        text = format_date_breaks_text(
+            date_obj,
+            weekly_breaks,
+            date_breaks,
+            prefix="❌ Добавление перерыва отменено."
+        )
+
+        await callback.message.edit_text(
+            text,
+            reply_markup=break_list_keyboard(
+                date_breaks,
+                f"date_{date_iso}",
+                "admin:breaks:date"
+            )
+        )
+
+    await callback.answer("Добавление отменено.")
+
+@router.callback_query(F.data.startswith("admin:breaks:delete:"))
+async def delete_break(callback: CallbackQuery):
+    await callback.answer()
+
+    parts = callback.data.split(":")
+
+    break_type = parts[3]
+    break_id = int(parts[4])
+
+    if break_type.startswith("weekly_"):
+        weekday = int(break_type.split("_")[1])
+
+        deleted = await delete_working_break(break_id)
+
+        breaks = await get_working_breaks(weekday)
+
+        weekday_name = WEEKDAYS[weekday]
+
+        text = (
+            f"☕ <b>Перерывы: {weekday_name}</b>\n\n"
+            "Нажмите на перерыв, чтобы удалить его:"
+            if breaks else
+            f"☕ <b>Перерывы: {weekday_name}</b>\n\n"
+            "На этот день перерывов пока нет."
+        )
+
+        if deleted:
+            await callback.answer("Перерыв удалён", show_alert=False)
+
+        await callback.message.edit_text(
+            text,
+            reply_markup=break_list_keyboard(
+                breaks,
+                break_type,
+                "admin:breaks:weekly"
+            )
+        )
+
+
+    elif break_type.startswith("date_"):
+
+        date_iso = break_type.replace("date_", "", 1)
+
+        deleted = await delete_date_break(break_id)
+
+        date_obj = datetime.strptime(
+
+            date_iso, "%Y-%m-%d"
+
+        ).date()
+
+        weekly_breaks = await get_working_breaks(date_obj.weekday())
+
+        date_breaks = await get_date_breaks(date_iso)
+
+        text = format_date_breaks_text(
+
+            date_obj,
+
+            weekly_breaks,
+
+            date_breaks,
+
+            prefix="✅ Разовый перерыв удалён."
+
+            if deleted else "⚠️ Перерыв не найден."
+
+        )
+
+        await callback.message.edit_text(
+
+            text,
+
+            reply_markup=break_list_keyboard(
+
+                date_breaks,
+
+                f"date_{date_iso}",
+
+                "admin:breaks:date"
+
+            )
+
+        )
+
+        await callback.answer(
+
+            "Перерыв удалён" if deleted else "Перерыв не найден",
+
+            show_alert=not deleted
+
+        )
+
+@router.callback_query(F.data == "admin:schedule:bookings")
+async def admin_schedule_bookings(callback: CallbackQuery):
     if callback.from_user.id != OWNER_TELEGRAM_ID:
         await callback.answer(
             "Доступ только для владельца.",

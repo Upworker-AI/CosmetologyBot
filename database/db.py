@@ -1,7 +1,6 @@
 import aiosqlite
 from config import DATABASE_PATH
-from datetime import  datetime
-
+from datetime import datetime, timedelta
 DATABASE_FILE = DATABASE_PATH
 
 async def init_db():
@@ -457,23 +456,202 @@ async def get_working_hours(weekday: int):
 
         return dict(row) if row else None
 
+async def update_working_hours(
+    weekday: int,
+    is_working: int,
+    start_time: str | None,
+    end_time: str | None,
+):
+    """Создаёт или обновляет рабочие часы выбранного дня."""
 
-async def get_schedule_exception(date: str):
-    """Получает индивидуальные настройки конкретной даты."""
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        await db.execute(
+            """
+            INSERT INTO working_hours (
+                weekday,
+                is_working,
+                start_time,
+                end_time
+            )
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(weekday) DO UPDATE SET
+                is_working = excluded.is_working,
+                start_time = excluded.start_time,
+                end_time = excluded.end_time
+            """,
+            (weekday, is_working, start_time, end_time),
+        )
+
+        await db.commit()
+
+
+async def get_schedule_conflicts(
+    weekday: int,
+    is_working: int,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    check_break: bool = False,
+    break_start: str | None = None,
+    break_end: str | None = None,
+    target_date: str | None = None,
+):
+    """
+    Проверяет конфликты с будущими записями.
+
+    check_break=False:
+        Проверка изменения рабочих часов.
+
+    check_break=True, target_date=None:
+        Проверка еженедельного перерыва.
+        Проверяются все будущие записи выбранного дня недели.
+
+    check_break=True, target_date задана:
+        Проверка разового перерыва.
+        Проверяются записи только на выбранную дату.
+    """
+
+    today = datetime.now().date()
+
     async with aiosqlite.connect(DATABASE_FILE) as db:
         db.row_factory = aiosqlite.Row
 
-        cursor = await db.execute(
-            """
-            SELECT exception_date, is_working, start_time, end_time, note
-            FROM schedule_exceptions
-            WHERE exception_date = ?
-            """,
-            (date,),
-        )
-        row = await cursor.fetchone()
+        # Получаем время подготовки после услуги
+        cursor = await db.execute("""
+            SELECT preparation_minutes
+            FROM schedule_settings
+            WHERE id = 1
+        """)
 
-        return dict(row) if row else None
+        settings = await cursor.fetchone()
+
+        preparation_minutes = (
+            settings["preparation_minutes"]
+            if settings else 10
+        )
+
+        # Получаем будущие активные записи
+        cursor = await db.execute("""
+            SELECT
+                br.id,
+                br.preferred_date,
+                br.preferred_time_slot,
+                br.start_time,
+                br.end_time,
+                br.status,
+                c.full_name,
+                s.title AS service_title
+            FROM booking_requests br
+            LEFT JOIN clients c ON c.id = br.client_id
+            LEFT JOIN services s ON s.id = br.service_id
+            WHERE br.status IN ('new', 'confirmed')
+              AND br.preferred_date != 'Дата уточняется'
+              AND br.start_time IS NOT NULL
+              AND br.end_time IS NOT NULL
+        """)
+
+        bookings = await cursor.fetchall()
+
+    conflicts = []
+
+    # Преобразуем дату разового перерыва
+    selected_date = None
+
+    if check_break and target_date:
+        selected_date = datetime.strptime(
+            target_date, "%Y-%m-%d"
+        ).date()
+
+    # Преобразуем границы перерыва
+    if check_break:
+        if not break_start or not break_end:
+            raise ValueError("Не указано время перерыва.")
+
+        break_start_min = _to_minutes(break_start)
+        break_end_min = _to_minutes(break_end)
+
+        if break_end_min <= break_start_min:
+            raise ValueError(
+                "Окончание перерыва должно быть позже начала."
+            )
+
+    for booking in bookings:
+
+        # Поддерживаем оба формата даты
+        try:
+            booking_date = datetime.strptime(
+                booking["preferred_date"], "%d.%m.%Y"
+            ).date()
+
+        except (ValueError, TypeError):
+            try:
+                booking_date = datetime.strptime(
+                    booking["preferred_date"], "%Y-%m-%d"
+                ).date()
+
+            except (ValueError, TypeError):
+                continue
+
+        # Прошедшие даты не проверяем
+        if booking_date < today:
+            continue
+
+        # Проверка разового перерыва
+        if check_break and selected_date is not None:
+            if booking_date != selected_date:
+                continue
+
+        # Проверка еженедельного перерыва
+        elif booking_date.weekday() != weekday:
+            continue
+
+        booking_start = _to_minutes(
+            booking["start_time"]
+        )
+
+        booking_end = _to_minutes(
+            booking["end_time"]
+        )
+
+        # -------------------------------
+        # Проверка пересечения с перерывом
+        # -------------------------------
+        if check_break:
+
+            # Учитываем подготовку после записи
+            booking_end += preparation_minutes
+
+            if (
+                booking_start < break_end_min
+                and booking_end > break_start_min
+            ):
+                conflicts.append(dict(booking))
+
+            continue
+
+        # -------------------------------
+        # Проверка изменения рабочих часов
+        # -------------------------------
+
+        # Если день становится выходным,
+        # любая активная запись конфликтует
+        if not is_working:
+            conflicts.append(dict(booking))
+            continue
+
+        if not start_time or not end_time:
+            conflicts.append(dict(booking))
+            continue
+
+        work_start = _to_minutes(start_time)
+        work_end = _to_minutes(end_time)
+
+        if (
+            booking_start < work_start
+            or booking_end > work_end
+        ):
+            conflicts.append(dict(booking))
+
+    return conflicts
 
 
 async def get_working_breaks(weekday: int):
@@ -514,7 +692,112 @@ async def get_date_breaks(date: str):
         return [dict(row) for row in rows]
 
 
-from datetime import datetime, timedelta
+async def add_working_break(
+    weekday: int,
+    start_time: str,
+    end_time: str,
+    title: str = "Обед"
+):
+    # Проверяем корректность времени
+    start = datetime.strptime(start_time, "%H:%M")
+    end = datetime.strptime(end_time, "%H:%M")
+
+    if end <= start:
+        raise ValueError("Время окончания должно быть позже начала.")
+
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        # Проверяем пересечение с другими перерывами
+        cursor = await db.execute(
+            """
+            SELECT id
+            FROM working_breaks
+            WHERE weekday = ?
+              AND start_time < ?
+              AND end_time > ?
+            """,
+            (weekday, end_time, start_time)
+        )
+
+        if await cursor.fetchone():
+            raise ValueError("Этот перерыв пересекается с существующим.")
+
+        cursor = await db.execute(
+            """
+            INSERT INTO working_breaks
+                (weekday, start_time, end_time, title)
+            VALUES (?, ?, ?, ?)
+            """,
+            (weekday, start_time, end_time, title)
+        )
+
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def delete_working_break(break_id: int):
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        cursor = await db.execute(
+            "DELETE FROM working_breaks WHERE id = ?",
+            (break_id,)
+        )
+
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def add_date_break(
+    date: str,
+    start_time: str,
+    end_time: str,
+    title: str = "Обед"
+):
+    # Проверяем дату и время
+    datetime.strptime(date, "%Y-%m-%d")
+
+    start = datetime.strptime(start_time, "%H:%M")
+    end = datetime.strptime(end_time, "%H:%M")
+
+    if end <= start:
+        raise ValueError("Время окончания должно быть позже начала.")
+
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        cursor = await db.execute(
+            """
+            SELECT id
+            FROM date_breaks
+            WHERE exception_date = ?
+              AND start_time < ?
+              AND end_time > ?
+            """,
+            (date, end_time, start_time)
+        )
+
+        if await cursor.fetchone():
+            raise ValueError("Этот перерыв пересекается с существующим.")
+
+        cursor = await db.execute(
+            """
+            INSERT INTO date_breaks
+                (exception_date, start_time, end_time, title)
+            VALUES (?, ?, ?, ?)
+            """,
+            (date, start_time, end_time, title)
+        )
+
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def delete_date_break(break_id: int):
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        cursor = await db.execute(
+            "DELETE FROM date_breaks WHERE id = ?",
+            (break_id,)
+        )
+
+        await db.commit()
+        return cursor.rowcount > 0
+
 
 
 def _to_minutes(value: str) -> int:
@@ -542,13 +825,7 @@ async def get_available_slots(
     selected_date: str,
     service_id: int,
 ) -> list[str]:
-    """
-    Рассчитывает свободные начала записи для услуги.
 
-    selected_date: ДД.ММ.ГГГГ или ГГГГ-ММ-ДД.
-    service_id: ID услуги из таблицы services.
-    """
-    # Приводим дату к формату, который использует расписание.
     try:
         date_obj = datetime.strptime(
             selected_date, "%d.%m.%Y"
@@ -746,3 +1023,4 @@ async def get_available_slots(
         candidate += step
 
     return available
+

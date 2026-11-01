@@ -144,15 +144,40 @@ def admin_menu_keyboard():
                 InlineKeyboardButton(
                     text="🔍 По услуге",
                     callback_data="admin:filter:service"
-                ),
-                InlineKeyboardButton(
-                    text="📆 По дате",
-                    callback_data="admin:filter:date"
                 )
             ],
         ]
     )
 
+def schedule_menu_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📋 Записи по датам",
+                    callback_data="admin:schedule:bookings"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🕒 Рабочий график",
+                    callback_data="admin:schedule:working_hours"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="☕ Перерывы",
+                    callback_data="admin:schedule:breaks"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ В меню",
+                    callback_data="admin:panel"
+                )
+            ]
+        ]
+    )
 
 def admin_booking_keyboard(booking_id: int, status: str):
     buttons = []
@@ -189,3 +214,112 @@ def admin_booking_keyboard(booking_id: int, status: str):
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def breaks_menu_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔁 Еженедельные перерывы",
+                    callback_data="admin:breaks:weekly"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 Перерывы на дату",
+                    callback_data="admin:breaks:date"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data="admin:schedule"
+                )
+            ]
+        ]
+    )
+
+
+def break_weekdays_keyboard():
+    weekdays = [
+        ("Понедельник", 0),
+        ("Вторник", 1),
+        ("Среда", 2),
+        ("Четверг", 3),
+        ("Пятница", 4),
+        ("Суббота", 5),
+        ("Воскресенье", 6),
+    ]
+
+    keyboard = []
+
+    for name, weekday in weekdays:
+        keyboard.append([
+            InlineKeyboardButton(
+                text=name,
+                callback_data=f"admin:breaks:weekday:{weekday}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data="admin:schedule:breaks"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def break_list_keyboard(breaks, break_type, return_callback):
+    keyboard = []
+
+    for item in breaks:
+        title = item.get("title") or "Перерыв"
+
+        keyboard.append([
+            InlineKeyboardButton(
+                text=(
+                    f"🗑 {item['start_time']}–{item['end_time']} "
+                    f"({title})"
+                ),
+                callback_data=(
+                    f"admin:breaks:delete:{break_type}:{item['id']}"
+                )
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            text="➕ Добавить перерыв",
+            callback_data=f"admin:breaks:add:{break_type}"
+        )
+    ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=return_callback
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def break_conflict_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Добавить всё равно",
+                    callback_data="admin:breaks:conflicts:confirm"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="admin:breaks:conflicts:cancel"
+                )
+            ]
+        ]
+    )
