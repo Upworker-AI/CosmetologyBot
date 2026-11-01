@@ -42,6 +42,7 @@ from database.db import (
     delete_working_break,
     add_date_break,
     delete_date_break,
+    reschedule_booking
 )
 from aiogram.exceptions import TelegramBadRequest
 
@@ -70,6 +71,13 @@ class AdminScheduleStates(StatesGroup):
     entering_start_time = State()
     entering_end_time = State()
     confirming_change = State()
+
+class AdminRescheduleStates(StatesGroup):
+    choosing_date = State()
+    entering_custom_date = State()
+    choosing_time = State()
+    confirming = State()
+
 WEEKDAYS = {
     0: "Понедельник",
     1: "Вторник",
@@ -80,6 +88,46 @@ WEEKDAYS = {
     6: "Воскресенье",
 }
 
+def admin_reschedule_date_keyboard(booking_id: int):
+    today = datetime.now().date()
+    buttons = []
+
+    for offset in range(7):
+        day = today + timedelta(days=offset)
+
+        if offset == 0:
+            label = f"Сегодня, {day.strftime('%d.%m')}"
+        elif offset == 1:
+            label = f"Завтра, {day.strftime('%d.%m')}"
+        else:
+            weekday = WEEKDAYS[day.weekday()]
+            label = f"{weekday}, {day.strftime('%d.%m')}"
+
+        buttons.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=(
+                    f"admin:reschedule:date:"
+                    f"{booking_id}:{day.isoformat()}"
+                )
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="📅 Другая дата",
+            callback_data=f"admin:reschedule:custom:{booking_id}"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="❌ Отменить перенос",
+            callback_data=f"admin:reschedule:cancel:{booking_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def working_hours_keyboard():
     buttons = []
@@ -2429,6 +2477,420 @@ async def admin_date_filter_apply(
         f"Найдено: {len(filtered)}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
+
+@router.callback_query(F.data.regexp(r"^admin:reschedule:\d+$"))
+async def admin_reschedule_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+
+    booking = await get_admin_booking_details(booking_id)
+
+    if not booking:
+        await callback.answer("Запись не найдена.", show_alert=True)
+        return
+
+    if booking["status"] not in ("new", "confirmed"):
+        await callback.answer(
+            "Эту запись нельзя перенести.",
+            show_alert=True
+        )
+        return
+
+    await state.clear()
+
+    await state.update_data(
+        booking_id=booking_id,
+        service_id=booking["service_id"],
+        old_date=booking["preferred_date"],
+        old_time=booking["preferred_time_slot"],
+    )
+
+    await state.set_state(AdminRescheduleStates.choosing_date)
+
+    await callback.message.edit_text(
+        f"📅 Перенос записи №{booking_id}\n\n"
+        f"Текущая дата: {booking['preferred_date']}\n"
+        f"Текущее время: {booking['preferred_time_slot']}\n\n"
+        f"Выберите новую дату:",
+        reply_markup=admin_reschedule_date_keyboard(booking_id)
+    )
+
+    await callback.answer()
+
+@router.callback_query(
+    F.data.startswith("admin:reschedule:date:")
+)
+async def admin_reschedule_choose_date(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    booking_id = int(parts[3])
+    selected_date = parts[4]
+
+    data = await state.get_data()
+
+    if data.get("booking_id") != booking_id:
+        await callback.answer(
+            "Сессия переноса устарела. Откройте перенос заново.",
+            show_alert=True
+        )
+        return
+
+    try:
+        date_obj = datetime.strptime(selected_date, "%Y-%m-%d").date()
+    except ValueError:
+        await callback.answer("Некорректная дата.", show_alert=True)
+        return
+
+    if date_obj < datetime.now().date():
+        await callback.answer(
+            "Нельзя выбрать прошедшую дату.",
+            show_alert=True
+        )
+        return
+
+    service_id = data["service_id"]
+
+    slots = await get_available_slots(
+        selected_date,
+        service_id,
+        exclude_booking_id=booking_id
+    )
+
+    if not slots:
+        await callback.answer(
+            "На эту дату нет свободного времени.",
+            show_alert=True
+        )
+        return
+
+    await state.update_data(new_date=selected_date)
+    await state.set_state(AdminRescheduleStates.choosing_time)
+
+    buttons = []
+
+    for slot in slots:
+        buttons.append([
+            InlineKeyboardButton(
+                text=slot,
+                callback_data=(
+                    f"admin:reschedule:time:"
+                    f"{booking_id}:{slot.replace(':', '-')}"
+                )
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ Выбрать другую дату",
+            callback_data=f"admin:reschedule:back:{booking_id}"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="❌ Отменить перенос",
+            callback_data=f"admin:reschedule:cancel:{booking_id}"
+        )
+    ])
+
+    await callback.message.edit_text(
+        f"📅 Новая дата: {date_obj.strftime('%d.%m.%Y')}\n\n"
+        f"Выберите свободное время:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+    await callback.answer()
+
+@router.callback_query(
+    F.data.startswith("admin:reschedule:custom:")
+)
+async def admin_reschedule_custom_date(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[3])
+    data = await state.get_data()
+
+    if data.get("booking_id") != booking_id:
+        await callback.answer("Сессия переноса устарела.", show_alert=True)
+        return
+
+    await state.set_state(AdminRescheduleStates.entering_custom_date)
+
+    await callback.message.edit_text(
+        "Введите новую дату в формате ДД.ММ.ГГГГ:"
+    )
+
+    await callback.answer()
+
+@router.message(AdminRescheduleStates.entering_custom_date)
+async def admin_reschedule_enter_date(
+    message: Message,
+    state: FSMContext,
+):
+    if message.from_user.id != OWNER_TELEGRAM_ID:
+        return
+
+    try:
+        date_obj = datetime.strptime(
+            message.text.strip(), "%d.%m.%Y"
+        ).date()
+    except (ValueError, AttributeError):
+        await message.answer(
+            "Неверный формат даты.\n"
+            "Введите дату в формате ДД.ММ.ГГГГ."
+        )
+        return
+
+    if date_obj < datetime.now().date():
+        await message.answer("Нельзя выбрать прошедшую дату.")
+        return
+
+    data = await state.get_data()
+    booking_id = data["booking_id"]
+
+    selected_date = date_obj.isoformat()
+
+    slots = await get_available_slots(
+        selected_date,
+        data["service_id"],
+        exclude_booking_id=booking_id
+    )
+
+    if not slots:
+        await message.answer(
+            "На эту дату нет свободного времени. "
+            "Введите другую дату."
+        )
+        return
+
+    await state.update_data(new_date=selected_date)
+    await state.set_state(AdminRescheduleStates.choosing_time)
+
+    buttons = []
+
+    for slot in slots:
+        buttons.append([
+            InlineKeyboardButton(
+                text=slot,
+                callback_data=(
+                    f"admin:reschedule:time:"
+                    f"{booking_id}:{slot.replace(':', '-')}"
+                )
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ Выбрать другую дату",
+            callback_data=f"admin:reschedule:back:{booking_id}"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="❌ Отменить перенос",
+            callback_data=f"admin:reschedule:cancel:{booking_id}"
+        )
+    ])
+
+    await message.answer(
+        f"📅 Новая дата: {date_obj.strftime('%d.%m.%Y')}\n\n"
+        f"Выберите свободное время:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+@router.callback_query(
+    F.data.startswith("admin:reschedule:time:")
+)
+async def admin_reschedule_choose_time(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    booking_id = int(parts[3])
+    new_time = parts[4].replace("-", ":")
+
+    data = await state.get_data()
+
+    if (
+        data.get("booking_id") != booking_id
+        or await state.get_state() != AdminRescheduleStates.choosing_time.state
+    ):
+        await callback.answer(
+            "Сессия переноса устарела. Начните заново.",
+            show_alert=True
+        )
+        return
+
+    new_date = data["new_date"]
+    date_display = datetime.strptime(
+        new_date, "%Y-%m-%d"
+    ).strftime("%d.%m.%Y")
+
+    await state.update_data(new_time=new_time)
+    await state.set_state(AdminRescheduleStates.confirming)
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="✅ Подтвердить перенос",
+                callback_data=f"admin:reschedule:confirm:{booking_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="❌ Отменить",
+                callback_data=f"admin:reschedule:cancel:{booking_id}"
+            )
+        ]
+    ]
+
+    await callback.message.edit_text(
+        f"📋 **Проверка переноса записи №{booking_id}**\n\n"
+        f"Старая дата: {data['old_date']}\n"
+        f"Старое время: {data['old_time']}\n\n"
+        f"Новая дата: {date_display}\n"
+        f"Новое время: {new_time}\n\n"
+        f"Подтвердить перенос?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="Markdown"
+    )
+
+    await callback.answer()
+
+@router.callback_query(
+    F.data.startswith("admin:reschedule:confirm:")
+)
+async def admin_reschedule_confirm(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[3])
+    data = await state.get_data()
+
+    if (
+        data.get("booking_id") != booking_id
+        or await state.get_state() != AdminRescheduleStates.confirming.state
+    ):
+        await callback.answer(
+            "Сессия переноса устарела. Начните заново.",
+            show_alert=True
+        )
+        return
+
+    try:
+        await reschedule_booking(
+            booking_id=booking_id,
+            new_date=data["new_date"],
+            new_time_slot=data["new_time"],
+        )
+
+    except ValueError as error:
+        await callback.answer(str(error), show_alert=True)
+        return
+
+    booking = await get_admin_booking_details(booking_id)
+
+    await state.clear()
+
+    date_display = datetime.strptime(
+        data["new_date"], "%Y-%m-%d"
+    ).strftime("%d.%m.%Y")
+
+    await callback.message.edit_text(
+        f"✅ Запись №{booking_id} успешно перенесена!\n\n"
+        f"Новая дата: {date_display}\n"
+        f"Новое время: {data['new_time']}",
+        reply_markup=admin_booking_keyboard(
+            booking_id,
+            booking["status"]
+        )
+    )
+
+    # Уведомляем клиента.
+    client_telegram_id = booking["client_telegram_id"]
+
+    if client_telegram_id:
+        await callback.bot.send_message(
+            client_telegram_id,
+            f"📅 Ваша запись №{booking_id} перенесена.\n\n"
+            f"Новая дата: {date_display}\n"
+            f"Новое время: {data['new_time']}\n\n"
+            f"Если у вас возникли вопросы, свяжитесь с нами."
+        )
+
+    await callback.answer("Запись перенесена!")
+
+@router.callback_query(
+    F.data.startswith("admin:reschedule:cancel:")
+)
+async def admin_reschedule_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    await state.clear()
+
+    await callback.message.edit_text(
+        "Перенос записи отменён."
+    )
+
+    await callback.answer()
+
+@router.callback_query(
+    F.data.startswith("admin:reschedule:back:")
+)
+async def admin_reschedule_back(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    if callback.from_user.id != OWNER_TELEGRAM_ID:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[3])
+    data = await state.get_data()
+
+    if data.get("booking_id") != booking_id:
+        await callback.answer("Сессия переноса устарела.", show_alert=True)
+        return
+
+    await state.set_state(AdminRescheduleStates.choosing_date)
+
+    await callback.message.edit_text(
+        "📅 Выберите новую дату:",
+        reply_markup=admin_reschedule_date_keyboard(booking_id)
+    )
+
+    await callback.answer()
 
 @router.message()
 async def start(message: Message):

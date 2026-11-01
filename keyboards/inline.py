@@ -194,6 +194,13 @@ def admin_booking_keyboard(booking_id: int, status: str):
             )
         ])
 
+        buttons.append([
+            InlineKeyboardButton(
+                text="📅 Перенести запись",
+                callback_data=f"admin:reschedule:{booking_id}"
+            )
+        ])
+
     elif status == "confirmed":
         buttons.append([
             InlineKeyboardButton(
@@ -206,6 +213,13 @@ def admin_booking_keyboard(booking_id: int, status: str):
             )
         ])
 
+        buttons.append([
+            InlineKeyboardButton(
+                text="📅 Перенести запись",
+                callback_data=f"admin:reschedule:{booking_id}"
+            )
+        ])
+
     buttons.append([
         InlineKeyboardButton(
             text="⬅️ К списку заявок",
@@ -214,7 +228,6 @@ def admin_booking_keyboard(booking_id: int, status: str):
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 
 def breaks_menu_keyboard():
     return InlineKeyboardMarkup(

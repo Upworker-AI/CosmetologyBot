@@ -273,6 +273,7 @@ async def get_client_bookings(telegram_id: int):
             """
             SELECT
                 br.id,
+                br.service_id,
                 br.preferred_date,
                 br.preferred_time_slot,
                 br.status,
@@ -375,6 +376,7 @@ async def get_admin_booking_details(booking_id: int):
             """
             SELECT
                 br.id,
+                br.service_id,
                 br.preferred_date,
                 br.preferred_time_slot,
                 br.status,
@@ -824,6 +826,7 @@ def _ranges_overlap(
 async def get_available_slots(
     selected_date: str,
     service_id: int,
+    exclude_booking_id: int | None = None
 ) -> list[str]:
 
     try:
@@ -970,8 +973,14 @@ async def get_available_slots(
               AND status IN ('new', 'confirmed')
               AND start_time IS NOT NULL
               AND end_time IS NOT NULL
+              AND (? IS NULL OR id != ?)
             """,
-            (date_display, date_iso),
+            (
+                date_display,
+                date_iso,
+                exclude_booking_id,
+                exclude_booking_id,
+            ),
         )
         bookings = await cursor.fetchall()
 
@@ -1024,3 +1033,246 @@ async def get_available_slots(
 
     return available
 
+async def reschedule_booking(
+    booking_id: int,
+    new_date: str,
+    new_time_slot: str,
+):
+    """
+    Переносит существующую заявку на новую дату и время.
+
+    Проверяет расписание, перерывы и занятые интервалы.
+    Проверка и обновление выполняются в одной транзакции.
+    """
+
+    async with aiosqlite.connect(DATABASE_FILE) as db:
+        db.row_factory = aiosqlite.Row
+
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+
+            # 1. Получаем переносимую заявку.
+            cursor = await db.execute(
+                """
+                SELECT id, service_id, status
+                FROM booking_requests
+                WHERE id = ?
+                """,
+                (booking_id,),
+            )
+            booking = await cursor.fetchone()
+
+            if booking is None:
+                raise ValueError("Заявка не найдена.")
+
+            if booking["status"] not in ("new", "confirmed"):
+                raise ValueError(
+                    "Переносить можно только новые "
+                    "и подтверждённые записи."
+                )
+
+            service_id = booking["service_id"]
+
+            # 2. Проверяем дату.
+            try:
+                date_obj = datetime.strptime(
+                    new_date, "%d.%m.%Y"
+                ).date()
+            except ValueError:
+                date_obj = datetime.strptime(
+                    new_date, "%Y-%m-%d"
+                ).date()
+
+            if date_obj < datetime.now().date():
+                raise ValueError("Нельзя перенести запись на прошедшую дату.")
+
+            date_iso = date_obj.isoformat()
+            date_display = date_obj.strftime("%d.%m.%Y")
+            weekday = date_obj.weekday()
+
+            # 3. Получаем длительность услуги.
+            cursor = await db.execute(
+                """
+                SELECT duration_minutes
+                FROM services
+                WHERE id = ? AND is_active = 1
+                """,
+                (service_id,),
+            )
+            service = await cursor.fetchone()
+
+            if service is None:
+                raise ValueError("Услуга не найдена или неактивна.")
+
+            duration = service["duration_minutes"]
+
+            if not duration or duration <= 0:
+                raise ValueError("Некорректная длительность услуги.")
+
+            # 4. Проверяем выбранное время.
+            start_minutes = _to_minutes(new_time_slot)
+            end_minutes = start_minutes + duration
+            blocked_end = end_minutes
+
+            # 5. Получаем настройки расписания.
+            cursor = await db.execute(
+                """
+                SELECT slot_step_minutes, preparation_minutes
+                FROM schedule_settings
+                WHERE id = 1
+                """
+            )
+            settings = await cursor.fetchone()
+
+            step = settings["slot_step_minutes"] if settings else 15
+            preparation = (
+                settings["preparation_minutes"] if settings else 10
+            )
+
+            if step <= 0 or preparation < 0:
+                raise ValueError("Некорректные настройки расписания.")
+
+            blocked_end += preparation
+
+            # 6. Получаем рабочие часы.
+            cursor = await db.execute(
+                """
+                SELECT is_working, start_time, end_time
+                FROM working_hours
+                WHERE weekday = ?
+                """,
+                (weekday,),
+            )
+            weekly_hours = await cursor.fetchone()
+
+            cursor = await db.execute(
+                """
+                SELECT is_working, start_time, end_time
+                FROM schedule_exceptions
+                WHERE exception_date = ?
+                """,
+                (date_iso,),
+            )
+            exception = await cursor.fetchone()
+
+            if exception:
+                if not exception["is_working"]:
+                    raise ValueError("В выбранную дату нерабочий день.")
+
+                work_start = exception["start_time"]
+                work_end = exception["end_time"]
+            else:
+                if not weekly_hours or not weekly_hours["is_working"]:
+                    raise ValueError("В выбранную дату нет рабочих часов.")
+
+                work_start = weekly_hours["start_time"]
+                work_end = weekly_hours["end_time"]
+
+            if not work_start or not work_end:
+                raise ValueError("Рабочее время для этой даты не настроено.")
+
+            work_start_min = _to_minutes(work_start)
+            work_end_min = _to_minutes(work_end)
+
+            if (
+                start_minutes < work_start_min
+                or end_minutes > work_end_min
+            ):
+                raise ValueError("Выбранное время вне рабочего графика.")
+
+            if (start_minutes - work_start_min) % step != 0:
+                raise ValueError("Выбранное время не соответствует шагу расписания.")
+
+            # 7. Проверяем перерывы.
+            cursor = await db.execute(
+                """
+                SELECT start_time, end_time
+                FROM working_breaks
+                WHERE weekday = ?
+
+                UNION ALL
+
+                SELECT start_time, end_time
+                FROM date_breaks
+                WHERE exception_date = ?
+                """,
+                (weekday, date_iso),
+            )
+            breaks = await cursor.fetchall()
+
+            for pause in breaks:
+                pause_start = _to_minutes(pause["start_time"])
+                pause_end = _to_minutes(pause["end_time"])
+
+                if _ranges_overlap(
+                    start_minutes,
+                    blocked_end,
+                    pause_start,
+                    pause_end,
+                ):
+                    raise ValueError(
+                        "Выбранное время пересекается с перерывом."
+                    )
+
+            # 8. Проверяем другие активные записи.
+            # Саму переносимую заявку исключаем.
+            cursor = await db.execute(
+                """
+                SELECT start_time, end_time
+                FROM booking_requests
+                WHERE preferred_date IN (?, ?)
+                  AND status IN ('new', 'confirmed')
+                  AND start_time IS NOT NULL
+                  AND end_time IS NOT NULL
+                  AND id != ?
+                """,
+                (date_display, date_iso, booking_id),
+            )
+            other_bookings = await cursor.fetchall()
+
+            for other in other_bookings:
+                busy_start = _to_minutes(other["start_time"])
+                busy_end = (
+                    _to_minutes(other["end_time"]) + preparation
+                )
+
+                if _ranges_overlap(
+                    start_minutes,
+                    blocked_end,
+                    busy_start,
+                    busy_end,
+                ):
+                    raise ValueError(
+                        "Это время уже занято. Выберите другое."
+                    )
+
+            # 9. Обновляем существующую заявку.
+            cursor = await db.execute(
+                """
+                UPDATE booking_requests
+                SET preferred_date = ?,
+                    preferred_time_slot = ?,
+                    start_time = ?,
+                    end_time = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                  AND status IN ('new', 'confirmed')
+                """,
+                (
+                    date_display,
+                    new_time_slot,
+                    new_time_slot,
+                    _to_time(end_minutes),
+                    booking_id,
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                raise ValueError("Не удалось обновить заявку.")
+
+            await db.commit()
+            return True
+
+        except Exception:
+            await db.rollback()
+            raise
